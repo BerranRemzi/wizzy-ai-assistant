@@ -3,8 +3,6 @@
 #include <TFT_eSPI.h>
 #include <demos/lv_demos.h>
 #include <WiFi.h>
-#include <HTTPClient.h>
-#include <WiFiClientSecure.h>
 #include <Preferences.h>
 #include <Audio.h>
 
@@ -31,6 +29,10 @@
 
 #ifndef ELEVENLABS_TEST_TEXT
 #define ELEVENLABS_TEST_TEXT "Аз съм Маги. Ставайте мъничета!"
+#endif
+
+#ifndef ELEVENLABS_OUTPUT_FORMAT
+#define ELEVENLABS_OUTPUT_FORMAT "mp3_22050_32"
 #endif
 
 #ifndef ICECAST_TEST_URL
@@ -75,8 +77,6 @@ static Preferences preferences;
 static constexpr uint8_t MIC_ADC_PIN = 25;
 static constexpr uint8_t RECORD_BUTTON_PIN = 32;
 static constexpr uint8_t SPEAKER_PIN = 26;
-static constexpr uint32_t TTS_PCM_SAMPLE_RATE = 16000;
-static constexpr uint8_t TTS_VOLUME_PERCENT = 18;
 static constexpr uint8_t AUDIO_LIB_VOLUME = 6;
 static lv_obj_t * test_status_label = NULL;
 Audio audio(true, I2S_DAC_CHANNEL_LEFT_EN);
@@ -372,92 +372,53 @@ static void set_test_status(const char *text)
   }
 }
 
-static uint8_t tts_pcm16_to_dac_u8(int16_t sample)
+static String url_encode_component(const String &input)
 {
-  int32_t scaled = ((int32_t)sample * TTS_VOLUME_PERCENT) / 100;
-  int32_t dac = (scaled >> 8) + 128;
-  if (dac < 0)
+  static const char hex[] = "0123456789ABCDEF";
+  String encoded;
+  encoded.reserve(input.length() * 3);
+  for (size_t idx = 0; idx < input.length(); ++idx)
   {
-    dac = 0;
+    uint8_t c = (uint8_t)input[idx];
+    bool safe = (c >= 'a' && c <= 'z') ||
+                (c >= 'A' && c <= 'Z') ||
+                (c >= '0' && c <= '9') ||
+                c == '-' || c == '_' || c == '.' || c == '~';
+    if (safe)
+    {
+      encoded += (char)c;
+    }
+    else
+    {
+      encoded += '%';
+      encoded += hex[(c >> 4) & 0x0F];
+      encoded += hex[c & 0x0F];
+    }
   }
-  if (dac > 255)
-  {
-    dac = 255;
-  }
-  return (uint8_t)dac;
+  return encoded;
 }
 
-static bool play_elevenlabs_pcm_stream(HTTPClient &https)
+static bool play_elevenlabs_stream_via_audio_library()
 {
-  WiFiClient *stream = https.getStreamPtr();
-  uint8_t block[1024];
-  int contentLength = https.getSize();
-  size_t totalBytes = 0;
-  unsigned long lastDataAt = millis();
-  bool carryByteValid = false;
-  uint8_t carryByte = 0;
+  String url = "https://api.elevenlabs.io/v1/text-to-speech/";
+  url += ELEVENLABS_VOICE_ID;
+  url += "/stream?output_format=";
+  url += ELEVENLABS_OUTPUT_FORMAT;
+  url += "&model_id=";
+  url += url_encode_component(String(ELEVENLABS_MODEL_ID));
+  url += "&text=";
+  url += url_encode_component(String(ELEVENLABS_TEST_TEXT));
+  url += "&xi_api_key=";
+  url += url_encode_component(String(ELEVENLABS_API_KEY));
 
-  pinMode(SPEAKER_PIN, OUTPUT);
-  dacWrite(SPEAKER_PIN, 128);
-
-  while (https.connected() && (contentLength > 0 || contentLength == -1))
+  audio.stopSong();
+  bool ok = audio.connecttohost(url.c_str());
+  if (!ok)
   {
-    size_t availableBytes = stream->available();
-    if (availableBytes == 0)
-    {
-      if ((millis() - lastDataAt) > 5000UL)
-      {
-        break;
-      }
-      delay(1);
-      continue;
-    }
-
-    size_t toRead = availableBytes;
-    if (toRead > sizeof(block))
-    {
-      toRead = sizeof(block);
-    }
-
-    int readBytes = stream->readBytes(block, toRead);
-    if (readBytes <= 0)
-    {
-      continue;
-    }
-
-    lastDataAt = millis();
-    totalBytes += (size_t)readBytes;
-    if (contentLength > 0)
-    {
-      contentLength -= readBytes;
-    }
-
-    size_t index = 0;
-    if (carryByteValid)
-    {
-      int16_t sample = (int16_t)((uint16_t)carryByte | ((uint16_t)block[0] << 8));
-      dacWrite(SPEAKER_PIN, tts_pcm16_to_dac_u8(sample));
-      delayMicroseconds(1000000UL / TTS_PCM_SAMPLE_RATE);
-      carryByteValid = false;
-      index = 1;
-    }
-
-    for (; index + 1 < (size_t)readBytes; index += 2)
-    {
-      int16_t sample = (int16_t)((uint16_t)block[index] | ((uint16_t)block[index + 1] << 8));
-      dacWrite(SPEAKER_PIN, tts_pcm16_to_dac_u8(sample));
-      delayMicroseconds(1000000UL / TTS_PCM_SAMPLE_RATE);
-    }
-
-    if (index < (size_t)readBytes)
-    {
-      carryByte = block[index];
-      carryByteValid = true;
-    }
+    Serial.println("Audio library failed to open ElevenLabs stream URL");
+    return false;
   }
-
-  dacWrite(SPEAKER_PIN, 128);
-  return totalBytes >= 1024;
+  return true;
 }
 
 static bool request_elevenlabs_stream_test()
@@ -478,58 +439,20 @@ static bool request_elevenlabs_stream_test()
     }
   }
 
-  WiFiClientSecure client;
-  client.setInsecure();
-
-  HTTPClient https;
-  String url = "https://api.elevenlabs.io/v1/text-to-speech/";
-  url += ELEVENLABS_VOICE_ID;
-  url += "/stream?output_format=pcm_16000";
-
-  if (!https.begin(client, url))
-  {
-    set_test_status("HTTPS begin failed");
-    return false;
-  }
-
-  https.addHeader("xi-api-key", ELEVENLABS_API_KEY);
-  https.addHeader("Content-Type", "application/json");
-
-  String payload = "{\"text\":\"";
-  payload += ELEVENLABS_TEST_TEXT;
-  payload += "\",\"model_id\":\"";
-  payload += ELEVENLABS_MODEL_ID;
-  payload += "\"}";
-
-  int httpCode = https.POST(payload);
-  if (httpCode <= 0)
-  {
-    Serial.printf("ElevenLabs POST failed: %s\n", https.errorToString(httpCode).c_str());
-    set_test_status("POST failed");
-    https.end();
-    return false;
-  }
-
-  if (httpCode != HTTP_CODE_OK)
-  {
-    Serial.printf("ElevenLabs HTTP %d\n", httpCode);
-    String body = https.getString();
-    Serial.println(body);
-    set_test_status("HTTP error");
-    https.end();
-    return false;
-  }
-
+  // Free current stream/network resources before opening TTS stream.
   audio.stopSong();
-  bool ok = play_elevenlabs_pcm_stream(https);
-  https.end();
+  delay(50);
+
+  Serial.println("TTS mode: audio library stream");
+  set_test_status("Requesting TTS stream...");
+  bool ok = play_elevenlabs_stream_via_audio_library();
   if (!ok)
   {
-    set_test_status("No PCM stream data");
+    set_test_status("TTS stream failed");
     return false;
   }
 
-  set_test_status("Playing TTS");
+  set_test_status("Playing TTS stream");
   return true;
 }
 
@@ -545,6 +468,8 @@ static bool request_http_stream_test(const char *url, const char *name)
     }
   }
 
+  // Always stop current stream before switching to another station.
+  audio.stopSong();
   if (!audio.connecttohost(url))
   {
     Serial.printf("%s stream failed\n", name);
@@ -702,8 +627,6 @@ void setup()
   }
   // Push-to-talk button: active-low on GPIO32.
   pinMode(RECORD_BUTTON_PIN, INPUT_PULLUP);
-  pinMode(SPEAKER_PIN, OUTPUT);
-  dacWrite(SPEAKER_PIN, 128);
 
   audio.setVolume(AUDIO_LIB_VOLUME); // 0..21
 
