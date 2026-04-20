@@ -4,6 +4,7 @@
 #include <demos/lv_demos.h>
 #include <WiFi.h>
 #include <Preferences.h>
+#include <Audio.h>
 
 #if __has_include("secrets.h")
 #  include "secrets.h"
@@ -11,6 +12,18 @@
 #  warning "Create include/secrets.h or credentials will be loaded from NVS only"
 #  define WIFI_SSID     ""
 #  define WIFI_PASSWORD ""
+#endif
+
+#ifndef ELEVENLABS_TEST_STREAM_URL
+#define ELEVENLABS_TEST_STREAM_URL ""
+#endif
+
+#ifndef ICECAST_TEST_URL
+#define ICECAST_TEST_URL "http://icecast.ndr.de/ndr/ndr1wellenord/kiel/mp3/128/stream.mp3"
+#endif
+
+#ifndef NRJ_TEST_URL
+#define NRJ_TEST_URL "http://play.global.audio/nrj64"
 #endif
 
 #include <Wire.h>
@@ -46,6 +59,10 @@ int touch_flag = 0;
 static Preferences preferences;
 static constexpr uint8_t MIC_ADC_PIN = 25;
 static constexpr uint8_t RECORD_BUTTON_PIN = 32;
+static constexpr uint8_t SPEAKER_PIN = 26;
+static constexpr uint8_t AUDIO_LIB_VOLUME = 6;
+static lv_obj_t * test_status_label = NULL;
+Audio audio(true, I2S_DAC_CHANNEL_LEFT_EN);
 
 //2.4
 #define SD_MOSI 23
@@ -107,12 +124,12 @@ void my_touchpad_read( lv_indev_drv_t * indev_driver, lv_indev_data_t * data )
 
 
 unsigned char buffer[256]; // buffer array for data recieve over serial port
-int count = 0;   // counter for buffer array
+int serial_buffer_count = 0;   // counter for buffer array
 void clearBufferArray()              // function to clear buffer array
 {
-  for (int i = 0; i < count; i++)
+  for (int i = 0; i < serial_buffer_count; i++)
   {
-    buffer[i] = NULL; // clear all index of array with command NULL
+    buffer[i] = 0;
   }
 }
 
@@ -306,6 +323,8 @@ static bool connect_wifi_from_sources()
 
   Serial.printf("Connecting WiFi SSID: %s\n", ssid.c_str());
   WiFi.mode(WIFI_STA);
+  // Power-save can cause audio stream underruns/pops on ESP32.
+  WiFi.setSleep(false);
   WiFi.begin(ssid.c_str(), pass.c_str());
 
   unsigned long started = millis();
@@ -325,6 +344,149 @@ static bool connect_wifi_from_sources()
   Serial.print("WiFi connected. IP: ");
   Serial.println(WiFi.localIP());
   return true;
+}
+
+static void set_test_status(const char *text)
+{
+  Serial.println(text);
+  if (test_status_label != NULL)
+  {
+    lv_label_set_text(test_status_label, text);
+  }
+}
+
+static bool request_elevenlabs_stream_test()
+{
+  if (strlen(ELEVENLABS_TEST_STREAM_URL) == 0)
+  {
+    set_test_status("Set ELEVENLABS_TEST_STREAM_URL");
+    return false;
+  }
+
+  if (WiFi.status() != WL_CONNECTED)
+  {
+    wifi_flag = connect_wifi_from_sources() ? 1 : 0;
+    if (wifi_flag == 0)
+    {
+      set_test_status("WiFi not connected");
+      return false;
+    }
+  }
+
+  if (!audio.connecttohost(ELEVENLABS_TEST_STREAM_URL))
+  {
+    set_test_status("ElevenLabs URL failed");
+    return false;
+  }
+
+  set_test_status("Playing ElevenLabs URL");
+  return true;
+}
+
+static bool request_http_stream_test(const char *url, const char *name)
+{
+  if (WiFi.status() != WL_CONNECTED)
+  {
+    wifi_flag = connect_wifi_from_sources() ? 1 : 0;
+    if (wifi_flag == 0)
+    {
+      set_test_status("WiFi not connected");
+      return false;
+    }
+  }
+
+  if (!audio.connecttohost(url))
+  {
+    Serial.printf("%s stream failed\n", name);
+    set_test_status("Stream failed");
+    return false;
+  }
+
+  Serial.printf("Playing %s stream\n", name);
+  set_test_status("Playing stream");
+  return true;
+}
+
+static void on_test_button_event(lv_event_t *e)
+{
+  if (lv_event_get_code(e) != LV_EVENT_CLICKED)
+  {
+    return;
+  }
+
+  set_test_status("Requesting stream...");
+  request_elevenlabs_stream_test();
+}
+
+static void on_ndr_button_event(lv_event_t *e)
+{
+  if (lv_event_get_code(e) != LV_EVENT_CLICKED)
+  {
+    return;
+  }
+
+  set_test_status("Requesting NDR stream...");
+  request_http_stream_test(ICECAST_TEST_URL, "NDR");
+}
+
+static void on_nrj_button_event(lv_event_t *e)
+{
+  if (lv_event_get_code(e) != LV_EVENT_CLICKED)
+  {
+    return;
+  }
+
+  set_test_status("Requesting NRJ stream...");
+  request_http_stream_test(NRJ_TEST_URL, "NRJ");
+}
+
+static void create_test_button()
+{
+  lv_obj_t *screen = lv_scr_act();
+  lv_obj_t *test_button = lv_btn_create(screen);
+  lv_obj_set_size(test_button, 92, 44);
+  lv_obj_align(test_button, LV_ALIGN_BOTTOM_RIGHT, -10, -10);
+  lv_obj_add_event_cb(test_button, on_test_button_event, LV_EVENT_ALL, NULL);
+
+  lv_obj_t *test_label = lv_label_create(test_button);
+  lv_label_set_text(test_label, "Test");
+  lv_obj_center(test_label);
+
+  lv_obj_t *ndr_button = lv_btn_create(screen);
+  lv_obj_set_size(ndr_button, 92, 44);
+  lv_obj_align(ndr_button, LV_ALIGN_BOTTOM_RIGHT, -108, -10);
+  lv_obj_add_event_cb(ndr_button, on_ndr_button_event, LV_EVENT_ALL, NULL);
+
+  lv_obj_t *ndr_label = lv_label_create(ndr_button);
+  lv_label_set_text(ndr_label, "NDR");
+  lv_obj_center(ndr_label);
+
+  lv_obj_t *nrj_button = lv_btn_create(screen);
+  lv_obj_set_size(nrj_button, 92, 44);
+  lv_obj_align(nrj_button, LV_ALIGN_BOTTOM_RIGHT, -206, -10);
+  lv_obj_add_event_cb(nrj_button, on_nrj_button_event, LV_EVENT_ALL, NULL);
+
+  lv_obj_t *nrj_label = lv_label_create(nrj_button);
+  lv_label_set_text(nrj_label, "NRJ");
+  lv_obj_center(nrj_label);
+
+  test_status_label = lv_label_create(screen);
+  lv_obj_set_width(test_status_label, 220);
+  lv_label_set_long_mode(test_status_label, LV_LABEL_LONG_CLIP);
+  lv_obj_align(test_status_label, LV_ALIGN_BOTTOM_LEFT, 10, -24);
+  lv_label_set_text(test_status_label, "Audio test ready");
+}
+
+void audio_info(const char *info)
+{
+  Serial.print("audio_info: ");
+  Serial.println(info);
+}
+
+void audio_showstreamtitle(const char *info)
+{
+  Serial.print("audio_title: ");
+  Serial.println(info);
 }
 
 void touch_calibrate()//屏幕校准
@@ -383,10 +545,15 @@ void setup()
   Serial.begin( 9600 ); /*初始化串口*/
   Serial2.begin( 9600 ); /*初始化串口2*/
 
-  // GPIO25 is reserved for MAX4466 analog output input.
-  pinMode(MIC_ADC_PIN, INPUT);
+  // If mic and speaker share a pin, speaker mode takes precedence for this firmware path.
+  if (MIC_ADC_PIN != SPEAKER_PIN)
+  {
+    pinMode(MIC_ADC_PIN, INPUT);
+  }
   // Push-to-talk button: active-low on GPIO32.
   pinMode(RECORD_BUTTON_PIN, INPUT_PULLUP);
+
+  audio.setVolume(AUDIO_LIB_VOLUME); // 0..21
 
   wifi_flag = connect_wifi_from_sources() ? 1 : 0;
 
@@ -454,6 +621,8 @@ void setup()
   ui_init();//开机UI界面
   while (1)
   {
+    audio.loop();
+
     if (goto_widget_flag == 1)//进入widget
     {
       if (ticker1.active() == true)
@@ -526,11 +695,14 @@ void setup()
 
   lcd.fillScreen(TFT_BLACK);
   lv_demo_widgets();//主UI界面
+  create_test_button();
   Serial.println( "Setup done" );
 }
 
 void loop()
 {
+  audio.loop();
+  audio.loop();
   lv_timer_handler();
-  delay(5);
+  delay(1);
 }
