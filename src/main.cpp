@@ -2,6 +2,16 @@
 #include <lvgl.h>
 #include <TFT_eSPI.h>
 #include <demos/lv_demos.h>
+#include <WiFi.h>
+#include <Preferences.h>
+
+#if __has_include("secrets.h")
+#  include "secrets.h"
+#else
+#  warning "Create include/secrets.h or credentials will be loaded from NVS only"
+#  define WIFI_SSID     ""
+#  define WIFI_PASSWORD ""
+#endif
 
 #include <Wire.h>
 #include <SPI.h>
@@ -32,6 +42,10 @@ char *info[128] = {};
 int wifi_flag = 0;
 int i = 0;
 int touch_flag = 0;
+
+static Preferences preferences;
+static constexpr uint8_t MIC_ADC_PIN = 25;
+static constexpr uint8_t RECORD_BUTTON_PIN = 32;
 
 //2.4
 #define SD_MOSI 23
@@ -271,6 +285,48 @@ int SD_init()
   return 0;
 }
 
+static bool connect_wifi_from_sources()
+{
+  String ssid = WIFI_SSID;
+  String pass = WIFI_PASSWORD;
+
+  if (ssid.isEmpty())
+  {
+    preferences.begin("wizzy", true);
+    ssid = preferences.getString("wifi_ssid", "");
+    pass = preferences.getString("wifi_pass", "");
+    preferences.end();
+  }
+
+  if (ssid.isEmpty())
+  {
+    Serial.println("WiFi credentials missing. Provide include/secrets.h or store NVS keys: wifi_ssid, wifi_pass.");
+    return false;
+  }
+
+  Serial.printf("Connecting WiFi SSID: %s\n", ssid.c_str());
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(ssid.c_str(), pass.c_str());
+
+  unsigned long started = millis();
+  while (WiFi.status() != WL_CONNECTED && (millis() - started) < 10000UL)
+  {
+    delay(250);
+    Serial.print('.');
+  }
+  Serial.println();
+
+  if (WiFi.status() != WL_CONNECTED)
+  {
+    Serial.println("WiFi connect timeout.");
+    return false;
+  }
+
+  Serial.print("WiFi connected. IP: ");
+  Serial.println(WiFi.localIP());
+  return true;
+}
+
 void touch_calibrate()//屏幕校准
 {
   uint16_t calData[5];
@@ -327,9 +383,12 @@ void setup()
   Serial.begin( 9600 ); /*初始化串口*/
   Serial2.begin( 9600 ); /*初始化串口2*/
 
-  //IO口引脚
-  pinMode(25, OUTPUT);
-  digitalWrite(25, LOW);
+  // GPIO25 is reserved for MAX4466 analog output input.
+  pinMode(MIC_ADC_PIN, INPUT);
+  // Push-to-talk button: active-low on GPIO32.
+  pinMode(RECORD_BUTTON_PIN, INPUT_PULLUP);
+
+  wifi_flag = connect_wifi_from_sources() ? 1 : 0;
 
   //lvgl初始化
   lv_init();
