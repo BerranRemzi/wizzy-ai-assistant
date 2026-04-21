@@ -28,7 +28,7 @@
 #endif
 
 #ifndef ELEVENLABS_TEST_TEXT
-#define ELEVENLABS_TEST_TEXT "Аз съм Маги. Ставайте мъничета!"
+#define ELEVENLABS_TEST_TEXT "Здравей, Бернар. Аз съм Маги. А тези мъничета защо спят?"
 #endif
 
 #ifndef ELEVENLABS_OUTPUT_FORMAT
@@ -64,9 +64,15 @@ static constexpr uint8_t RECORD_BUTTON_PIN = 32;
 static constexpr uint8_t SPEAKER_PIN = 26;
 static constexpr uint8_t AUDIO_LIB_VOLUME = 21; 
 static constexpr uint16_t TTS_BRIDGE_PORT = 8081;
+static constexpr uint32_t TTS_DRAIN_MIN_MS = 1000;
+static constexpr uint32_t TTS_DRAIN_FORCE_MS = 12000;
+static constexpr uint32_t TTS_DRAIN_BUFFER_BYTES = 256;
 static lv_obj_t * test_status_label = NULL;
 Audio audio(true, I2S_DAC_CHANNEL_LEFT_EN);
 static WiFiServer tts_bridge_server(TTS_BRIDGE_PORT);
+static volatile bool tts_stream_active = false;
+static volatile bool tts_bridge_finished = false;
+static volatile uint32_t tts_bridge_finished_at_ms = 0;
 
 //2.4
 #define SD_MOSI 23
@@ -344,6 +350,32 @@ static String read_http_line(WiFiClient &client, uint32_t timeout_ms)
   return String();
 }
 
+static bool read_exact_with_timeout(WiFiClient &client, uint8_t *dst, size_t len, uint32_t timeout_ms)
+{
+  size_t offset = 0;
+  uint32_t last_data = millis();
+  while (offset < len)
+  {
+    int avail = client.available();
+    if (avail > 0)
+    {
+      size_t want = min((size_t)avail, len - offset);
+      int n = client.read(dst + offset, want);
+      if (n > 0)
+      {
+        offset += (size_t)n;
+        last_data = millis();
+      }
+    }
+    else
+    {
+      if ((millis() - last_data) > timeout_ms) return false;
+      delay(1);
+    }
+  }
+  return true;
+}
+
 static void handle_tts_bridge_client(WiFiClient &downstream)
 {
   String request_line = read_http_line(downstream, 4000);
@@ -391,7 +423,7 @@ static void handle_tts_bridge_client(WiFiClient &downstream)
   upstream.print("Content-Length: " + String(payload.length()) + "\r\n\r\n");
   upstream.print(payload);
 
-  String status = read_http_line(upstream, 6000);
+  String status = read_http_line(upstream, 15000);
   bool ok = status.startsWith("HTTP/1.1 200") || status.startsWith("HTTP/1.0 200");
 
   bool chunked = false;
@@ -399,7 +431,7 @@ static void handle_tts_bridge_client(WiFiClient &downstream)
   String content_type = "audio/mpeg";
   while (true)
   {
-    String h = read_http_line(upstream, 6000);
+    String h = read_http_line(upstream, 15000);
     if (h.length() == 0) break;
     String hl = h;
     hl.toLowerCase();
@@ -422,36 +454,88 @@ static void handle_tts_bridge_client(WiFiClient &downstream)
     return;
   }
 
-  downstream.print("HTTP/1.1 200 OK\r\n");
+  // Always stream raw MP3 bytes downstream. If upstream is chunked,
+  // we decode chunks here so the audio client receives plain audio payload.
+  downstream.print("HTTP/1.0 200 OK\r\n");
   if (has_content_type) downstream.print("Content-Type: " + content_type + "\r\n");
   else downstream.print("Content-Type: audio/mpeg\r\n");
-  if (chunked) downstream.print("Transfer-Encoding: chunked\r\n");
   downstream.print("Connection: close\r\n\r\n");
 
   uint8_t relay_buf[1024];
-  uint32_t idle_started = millis();
-  while (upstream.connected() || upstream.available())
+  if (chunked)
   {
-    int avail = upstream.available();
-    if (avail > 0)
+    for (;;)
     {
-      int n = upstream.read(relay_buf, (size_t)min(avail, (int)sizeof(relay_buf)));
-      if (n > 0)
+      String chunk_line = read_http_line(upstream, 30000);
+      if (chunk_line.length() == 0)
       {
-        downstream.write(relay_buf, (size_t)n);
-        idle_started = millis();
+        break;
+      }
+
+      int semicolon = chunk_line.indexOf(';');
+      if (semicolon >= 0) chunk_line = chunk_line.substring(0, semicolon);
+      chunk_line.trim();
+      size_t chunk_size = strtoul(chunk_line.c_str(), nullptr, 16);
+      if (chunk_size == 0)
+      {
+        // Consume optional trailer headers.
+        while (true)
+        {
+          String trailer = read_http_line(upstream, 30000);
+          if (trailer.length() == 0) break;
+        }
+        break;
+      }
+
+      size_t remaining = chunk_size;
+      while (remaining > 0)
+      {
+        size_t part = min(remaining, sizeof(relay_buf));
+        if (!read_exact_with_timeout(upstream, relay_buf, part, 30000))
+        {
+          remaining = 0;
+          break;
+        }
+        downstream.write(relay_buf, part);
+        remaining -= part;
+      }
+
+      uint8_t crlf[2];
+      if (!read_exact_with_timeout(upstream, crlf, 2, 30000))
+      {
+        break;
       }
     }
-    else
+  }
+  else
+  {
+    uint32_t idle_started = millis();
+    while (upstream.connected() || upstream.available())
     {
-      if ((millis() - idle_started) > 10000) break;
-      delay(1);
+      int avail = upstream.available();
+      if (avail > 0)
+      {
+        int n = upstream.read(relay_buf, (size_t)min(avail, (int)sizeof(relay_buf)));
+        if (n > 0)
+        {
+          downstream.write(relay_buf, (size_t)n);
+          idle_started = millis();
+        }
+      }
+      else
+      {
+        if ((millis() - idle_started) > 30000) break;
+        delay(1);
+      }
     }
   }
 
   downstream.flush();
   upstream.stop();
   downstream.stop();
+
+  tts_bridge_finished = true;
+  tts_bridge_finished_at_ms = millis();
 }
 
 static void tts_bridge_task(void* parameter)
@@ -487,6 +571,9 @@ static bool request_elevenlabs_stream_test()
 
   // Free current stream/network resources before opening TTS stream.
   audio.stopSong();
+  tts_stream_active = false;
+  tts_bridge_finished = false;
+  tts_bridge_finished_at_ms = 0;
   delay(50);
 
   Serial.println("TTS mode: bridge POST -> local GET");
@@ -500,6 +587,7 @@ static bool request_elevenlabs_stream_test()
   }
 
   set_test_status("Playing TTS stream");
+  tts_stream_active = true;
   
   return true;
 }
@@ -640,6 +728,32 @@ void audio_showstreamtitle(const char *info)
 {
   Serial.print("audio_title: ");
   Serial.println(info);
+}
+
+void audio_eof_stream(const char *info)
+{
+  Serial.print("audio_eof_stream: ");
+  Serial.println(info ? info : "");
+  if (tts_stream_active)
+  {
+    tts_stream_active = false;
+    tts_bridge_finished = false;
+    tts_bridge_finished_at_ms = 0;
+    set_test_status("TTS finished");
+  }
+}
+
+void audio_eof_mp3(const char *info)
+{
+  Serial.print("audio_eof_mp3: ");
+  Serial.println(info ? info : "");
+  if (tts_stream_active)
+  {
+    tts_stream_active = false;
+    tts_bridge_finished = false;
+    tts_bridge_finished_at_ms = 0;
+    set_test_status("TTS finished");
+  }
 }
 
 void touch_calibrate()//屏幕校准
@@ -798,7 +912,26 @@ void loop()
   }
 
   audio.loop();
-  audio.loop();
+
+  if (tts_stream_active && tts_bridge_finished)
+  {
+    uint32_t now = millis();
+    uint32_t elapsed = now - tts_bridge_finished_at_ms;
+    uint32_t buffered = audio.inBufferFilled();
+
+    // Prefer natural decoder EOF. Fallback stop only after data has had time
+    // to drain from the internal buffer, or after a long hard timeout.
+    if ((elapsed >= TTS_DRAIN_MIN_MS && buffered <= TTS_DRAIN_BUFFER_BYTES) ||
+        (elapsed >= TTS_DRAIN_FORCE_MS))
+    {
+      audio.stopSong();
+      tts_stream_active = false;
+      tts_bridge_finished = false;
+      tts_bridge_finished_at_ms = 0;
+      set_test_status("TTS finished");
+    }
+  }
+
   lv_timer_handler();
   delay(1);
 }
