@@ -2,6 +2,7 @@
 #include <lvgl.h>
 #include <TFT_eSPI.h>
 #include <WiFi.h>
+#include <WiFiClientSecure.h>
 #include <Preferences.h>
 #include <Audio.h>
 
@@ -61,9 +62,11 @@ static Preferences preferences;
 static constexpr uint8_t MIC_ADC_PIN = 25;
 static constexpr uint8_t RECORD_BUTTON_PIN = 32;
 static constexpr uint8_t SPEAKER_PIN = 26;
-static constexpr uint8_t AUDIO_LIB_VOLUME = 6;
+static constexpr uint8_t AUDIO_LIB_VOLUME = 21; 
+static constexpr uint16_t TTS_BRIDGE_PORT = 8081;
 static lv_obj_t * test_status_label = NULL;
 Audio audio(true, I2S_DAC_CHANNEL_LEFT_EN);
+static WiFiServer tts_bridge_server(TTS_BRIDGE_PORT);
 
 //2.4
 #define SD_MOSI 23
@@ -280,48 +283,188 @@ static void set_test_status(const char *text)
   }
 }
 
-// Background task for TTS connection (prevents UI freeze during SSL handshake)
-static void tts_connect_task(void* parameter)
+static String json_escape(const char *text)
 {
-  Serial.println("TTS task: starting connection...");
-  
-  bool ok = audio.connecttoelevenlabs(
-    ELEVENLABS_TEST_TEXT,
-    ELEVENLABS_API_KEY,
-    ELEVENLABS_VOICE_ID,
-    ELEVENLABS_MODEL_ID
-  );
-  
-  if (!ok)
+  String out;
+  while (*text)
   {
-    Serial.println("TTS task: connection failed");
-    set_test_status("TTS stream failed");
+    char c = *text++;
+    switch (c)
+    {
+      case '"': out += "\\\""; break;
+      case '\\': out += "\\\\"; break;
+      case '\n': out += "\\n"; break;
+      case '\r': out += "\\r"; break;
+      case '\t': out += "\\t"; break;
+      default: out += c; break;
+    }
   }
-  else
-  {
-    Serial.println("TTS task: connection successful");
-    set_test_status("Playing TTS stream");
-  }
-  
-  // Task is done, delete itself
-  vTaskDelete(NULL);
+  return out;
 }
 
-static bool play_elevenlabs_stream_via_audio_library()
+static String url_encode(const char *text)
 {
-  audio.stopSong();
-  bool ok = audio.connecttoelevenlabs(
-    ELEVENLABS_TEST_TEXT,
-    ELEVENLABS_API_KEY,
-    ELEVENLABS_VOICE_ID,
-    ELEVENLABS_MODEL_ID
-  );
+  static const char hex[] = "0123456789ABCDEF";
+  String out;
+  while (*text)
+  {
+    uint8_t c = (uint8_t)(*text++);
+    bool safe = (c >= 'a' && c <= 'z') ||
+                (c >= 'A' && c <= 'Z') ||
+                (c >= '0' && c <= '9') ||
+                c == '-' || c == '_' || c == '.' || c == '~';
+    if (safe)
+    {
+      out += (char)c;
+    }
+    else
+    {
+      out += '%';
+      out += hex[(c >> 4) & 0x0F];
+      out += hex[c & 0x0F];
+    }
+  }
+  return out;
+}
+
+static String read_http_line(WiFiClient &client, uint32_t timeout_ms)
+{
+  String line;
+  uint32_t started = millis();
+  while ((millis() - started) < timeout_ms)
+  {
+    while (client.available())
+    {
+      char ch = (char)client.read();
+      if (ch == '\n') return line;
+      if (ch != '\r') line += ch;
+    }
+    delay(1);
+  }
+  return String();
+}
+
+static void handle_tts_bridge_client(WiFiClient &downstream)
+{
+  String request_line = read_http_line(downstream, 4000);
+  if (!request_line.startsWith("GET "))
+  {
+    downstream.print("HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n");
+    downstream.stop();
+    return;
+  }
+
+  // Consume request headers.
+  while (true)
+  {
+    String h = read_http_line(downstream, 2000);
+    if (h.length() == 0) break;
+  }
+
+  if (strlen(ELEVENLABS_API_KEY) == 0)
+  {
+    downstream.print("HTTP/1.1 500 Internal Server Error\r\nConnection: close\r\n\r\nMissing API key\n");
+    downstream.stop();
+    return;
+  }
+
+  WiFiClientSecure upstream;
+  upstream.setInsecure();
+  if (!upstream.connect("api.elevenlabs.io", 443))
+  {
+    downstream.print("HTTP/1.1 502 Bad Gateway\r\nConnection: close\r\n\r\nUpstream connect failed\n");
+    downstream.stop();
+    return;
+  }
+
+  String voice_id = url_encode(ELEVENLABS_VOICE_ID);
+  String payload = "{\"text\":\"" + json_escape(ELEVENLABS_TEST_TEXT) + "\",\"model_id\":\"" + json_escape(ELEVENLABS_MODEL_ID) + "\"}";
+  String path = "/v1/text-to-speech/" + voice_id + "/stream?output_format=" + ELEVENLABS_OUTPUT_FORMAT;
+
+  upstream.print("POST " + path + " HTTP/1.1\r\n");
+  upstream.print("Host: api.elevenlabs.io\r\n");
+  upstream.print("xi-api-key: " + String(ELEVENLABS_API_KEY) + "\r\n");
+  upstream.print("Content-Type: application/json\r\n");
+  upstream.print("Accept: audio/mpeg\r\n");
+  upstream.print("Accept-Encoding: identity\r\n");
+  upstream.print("Connection: close\r\n");
+  upstream.print("Content-Length: " + String(payload.length()) + "\r\n\r\n");
+  upstream.print(payload);
+
+  String status = read_http_line(upstream, 6000);
+  bool ok = status.startsWith("HTTP/1.1 200") || status.startsWith("HTTP/1.0 200");
+
+  bool chunked = false;
+  bool has_content_type = false;
+  String content_type = "audio/mpeg";
+  while (true)
+  {
+    String h = read_http_line(upstream, 6000);
+    if (h.length() == 0) break;
+    String hl = h;
+    hl.toLowerCase();
+    if (hl.startsWith("transfer-encoding:") && hl.indexOf("chunked") >= 0) chunked = true;
+    if (hl.startsWith("content-type:"))
+    {
+      has_content_type = true;
+      content_type = h.substring(strlen("Content-Type:"));
+      content_type.trim();
+    }
+  }
+
   if (!ok)
   {
-    Serial.println("Audio library connecttoelevenlabs failed");
-    return false;
+    downstream.print("HTTP/1.1 502 Bad Gateway\r\nConnection: close\r\n\r\nElevenLabs error: ");
+    downstream.print(status);
+    downstream.print("\n");
+    upstream.stop();
+    downstream.stop();
+    return;
   }
-  return true;
+
+  downstream.print("HTTP/1.1 200 OK\r\n");
+  if (has_content_type) downstream.print("Content-Type: " + content_type + "\r\n");
+  else downstream.print("Content-Type: audio/mpeg\r\n");
+  if (chunked) downstream.print("Transfer-Encoding: chunked\r\n");
+  downstream.print("Connection: close\r\n\r\n");
+
+  uint8_t relay_buf[1024];
+  uint32_t idle_started = millis();
+  while (upstream.connected() || upstream.available())
+  {
+    int avail = upstream.available();
+    if (avail > 0)
+    {
+      int n = upstream.read(relay_buf, (size_t)min(avail, (int)sizeof(relay_buf)));
+      if (n > 0)
+      {
+        downstream.write(relay_buf, (size_t)n);
+        idle_started = millis();
+      }
+    }
+    else
+    {
+      if ((millis() - idle_started) > 10000) break;
+      delay(1);
+    }
+  }
+
+  downstream.flush();
+  upstream.stop();
+  downstream.stop();
+}
+
+static void tts_bridge_task(void* parameter)
+{
+  for (;;)
+  {
+    WiFiClient client = tts_bridge_server.available();
+    if (client)
+    {
+      handle_tts_bridge_client(client);
+    }
+    vTaskDelay(2 / portTICK_PERIOD_MS);
+  }
 }
 
 static bool request_elevenlabs_stream_test()
@@ -346,18 +489,17 @@ static bool request_elevenlabs_stream_test()
   audio.stopSong();
   delay(50);
 
-  Serial.println("TTS mode: connecttoelevenlabs");
+  Serial.println("TTS mode: bridge POST -> local GET");
   set_test_status("Connecting to TTS...");
-  
-  // Create background task for TTS connection (prevents UI freeze)
-  xTaskCreate(
-    tts_connect_task,    // Task function
-    "TTS_Connect",       // Task name
-    8192,                // Stack size (bytes)
-    NULL,                // Parameters
-    1,                   // Priority
-    NULL                 // Task handle
-  );
+
+  String local_url = "http://" + WiFi.localIP().toString() + ":" + String(TTS_BRIDGE_PORT) + "/tts";
+  if (!audio.connecttohost(local_url.c_str()))
+  {
+    set_test_status("TTS bridge connect failed");
+    return false;
+  }
+
+  set_test_status("Playing TTS stream");
   
   return true;
 }
@@ -386,6 +528,36 @@ static bool request_http_stream_test(const char *url, const char *name)
   Serial.printf("Playing %s stream\n", name);
   set_test_status("Playing stream");
   return true;
+}
+
+static void handle_serial_command(char cmd)
+{
+  switch (cmd)
+  {
+    case '1':
+      Serial.println("Serial cmd 1: play radio");
+      set_test_status("Requesting radio stream...");
+      request_http_stream_test(NRJ_TEST_URL, "NRJ");
+      break;
+    case '2':
+      Serial.println("Serial cmd 2: play test");
+      set_test_status("Requesting test stream...");
+      request_http_stream_test(ICECAST_TEST_URL, "NDR");
+      break;
+    case '3':
+      Serial.println("Serial cmd 3: elevenlabs test");
+      set_test_status("Requesting TTS stream...");
+      request_elevenlabs_stream_test();
+      break;
+    case '\r':
+    case '\n':
+    case ' ':
+      break;
+    default:
+      Serial.printf("Unknown serial command: %c\n", cmd);
+      Serial.println("Use: 1=play radio, 2=play test, 3=elevenlabs test");
+      break;
+  }
 }
 
 static void on_test_button_event(lv_event_t *e)
@@ -600,12 +772,31 @@ void setup()
   ui_init();//开机UI界面
   lv_timer_handler();
   create_test_button();
+
+  tts_bridge_server.begin();
+  xTaskCreate(
+    tts_bridge_task,
+    "TTS_Bridge",
+    8192,
+    NULL,
+    1,
+    NULL
+  );
+
   set_test_status("Audio test ready");
+  request_elevenlabs_stream_test();
+  Serial.println("Serial commands: 1=play radio, 2=play test, 3=elevenlabs test");
   Serial.println( "Setup done" );
 }
 
 void loop()
 {
+  while (Serial.available() > 0)
+  {
+    char cmd = (char)Serial.read();
+    handle_serial_command(cmd);
+  }
+
   audio.loop();
   audio.loop();
   lv_timer_handler();
