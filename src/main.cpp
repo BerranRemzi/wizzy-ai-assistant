@@ -1,7 +1,6 @@
 #include <Arduino.h>
 #include <lvgl.h>
 #include <TFT_eSPI.h>
-#include <demos/lv_demos.h>
 #include <WiFi.h>
 #include <Preferences.h>
 #include <Audio.h>
@@ -49,21 +48,6 @@
 #include <FS.h>
 //UI
 #include "ui.h"
-#include <Ticker.h>          //Call the ticker. H Library
-Ticker ticker1;
-static int first_flag = 0;
-extern int zero_clean;
-extern int goto_widget_flag;
-extern int bar_flag;
-extern lv_obj_t * ui_MENU;
-extern lv_obj_t * ui_TOUCH;
-extern lv_obj_t * ui_JIAOZHUN;
-extern lv_obj_t * ui_Label2;
-static lv_obj_t * ui_Label;//TOUCH界面label
-static lv_obj_t * ui_Label3;//TOUCH界面label3
-static lv_obj_t * ui_Labe2;//Menu界面进度条label
-static lv_obj_t * bar;//Menu界面进度条
-static int val = 100;
 
 char buf[128] = {};
 int bufindex = 0;
@@ -155,82 +139,6 @@ int NO_Test_Flag = 0;
 int Test_Flag = 0;
 int Close_Flag = 0;
 uint16_t calData[5] = { 557, 3263, 369, 3493, 3  };
-void callback1()  //Callback function
-{
-  if (bar_flag == 6)
-  {
-    if (val > 1)
-    {
-      val--;
-      lv_bar_set_value(bar, val, LV_ANIM_OFF);
-      lv_label_set_text_fmt(ui_Labe2, "%d %%", val);
-    }
-    else
-    {
-      lv_obj_clear_flag(ui_touch, LV_OBJ_FLAG_CLICKABLE);
-      lv_label_set_text(ui_Labe2, "Loading");
-      delay(150);
-      val = 100;
-      bar_flag = 0; //停止进度条标志
-      goto_widget_flag = 1; //进入widget标志
-
-    }
-  }
-}
-
-
-
-
-
-//触摸Label控件
-void label_xy()
-{
-  ui_Label = lv_label_create(ui_TOUCH);
-  lv_obj_enable_style_refresh(true);
-  lv_obj_set_width(ui_Label, LV_SIZE_CONTENT);   /// 1
-  lv_obj_set_height(ui_Label, LV_SIZE_CONTENT);    /// 1
-  lv_obj_set_x(ui_Label, -30);
-  lv_obj_set_y(ui_Label, -35);
-  lv_obj_set_align(ui_Label, LV_ALIGN_CENTER);
-  lv_obj_set_style_text_color(ui_Label, lv_color_hex(0xFF0000), LV_PART_MAIN | LV_STATE_DEFAULT);
-  lv_obj_set_style_text_opa(ui_Label, 255, LV_PART_MAIN | LV_STATE_DEFAULT);
-  lv_obj_set_style_text_font(ui_Label, &lv_font_montserrat_16, LV_PART_MAIN | LV_STATE_DEFAULT);
-
-  ui_Label3 = lv_label_create(ui_TOUCH);
-  lv_obj_enable_style_refresh(true);
-  lv_obj_set_width(ui_Label3, LV_SIZE_CONTENT);   /// 1
-  lv_obj_set_height(ui_Label3, LV_SIZE_CONTENT);    /// 1
-  lv_obj_set_x(ui_Label3, 58);
-  lv_obj_set_y(ui_Label3, -35);
-  lv_obj_set_align(ui_Label3, LV_ALIGN_CENTER);
-  lv_obj_set_style_text_color(ui_Label3, lv_color_hex(0x00FF00), LV_PART_MAIN | LV_STATE_DEFAULT);
-  lv_obj_set_style_text_opa(ui_Label3, 255, LV_PART_MAIN | LV_STATE_DEFAULT);
-  lv_obj_set_style_text_font(ui_Label3, &lv_font_montserrat_16, LV_PART_MAIN | LV_STATE_DEFAULT);
-}
-
-
-//进度条控件
-void lv_example_bar(void)
-{
-  //////////////////////////////
-  bar = lv_bar_create(ui_MENU);
-  lv_bar_set_value(bar, 0, LV_ANIM_OFF);
-  lv_obj_set_width(bar, 150);
-  lv_obj_set_height(bar, 15);
-  lv_obj_set_x(bar, 0);
-  lv_obj_set_y(bar, 90);
-  lv_obj_set_align(bar, LV_ALIGN_CENTER);
-  lv_obj_set_style_bg_img_src(bar, &ui_img_bar_320_01_png, LV_PART_MAIN | LV_STATE_DEFAULT);
-
-  lv_obj_set_style_bg_img_src(bar, &ui_img_bar_320_02_png, LV_PART_INDICATOR | LV_STATE_DEFAULT);
-  lv_obj_set_style_outline_color(bar, lv_color_hex(0x2D8812), LV_PART_INDICATOR | LV_STATE_DEFAULT);
-  lv_obj_set_style_outline_opa(bar, 255, LV_PART_INDICATOR | LV_STATE_DEFAULT);
-
-  ui_Labe2 = lv_label_create(bar);//创建标签
-  lv_obj_set_style_text_color(ui_Labe2, lv_color_hex(0x09BEFB), LV_STATE_DEFAULT);
-  lv_label_set_text(ui_Labe2, "0%");
-  lv_obj_center(ui_Labe2);
-}
 
 
 
@@ -372,50 +280,45 @@ static void set_test_status(const char *text)
   }
 }
 
-static String url_encode_component(const String &input)
+// Background task for TTS connection (prevents UI freeze during SSL handshake)
+static void tts_connect_task(void* parameter)
 {
-  static const char hex[] = "0123456789ABCDEF";
-  String encoded;
-  encoded.reserve(input.length() * 3);
-  for (size_t idx = 0; idx < input.length(); ++idx)
+  Serial.println("TTS task: starting connection...");
+  
+  bool ok = audio.connecttoelevenlabs(
+    ELEVENLABS_TEST_TEXT,
+    ELEVENLABS_API_KEY,
+    ELEVENLABS_VOICE_ID,
+    ELEVENLABS_MODEL_ID
+  );
+  
+  if (!ok)
   {
-    uint8_t c = (uint8_t)input[idx];
-    bool safe = (c >= 'a' && c <= 'z') ||
-                (c >= 'A' && c <= 'Z') ||
-                (c >= '0' && c <= '9') ||
-                c == '-' || c == '_' || c == '.' || c == '~';
-    if (safe)
-    {
-      encoded += (char)c;
-    }
-    else
-    {
-      encoded += '%';
-      encoded += hex[(c >> 4) & 0x0F];
-      encoded += hex[c & 0x0F];
-    }
+    Serial.println("TTS task: connection failed");
+    set_test_status("TTS stream failed");
   }
-  return encoded;
+  else
+  {
+    Serial.println("TTS task: connection successful");
+    set_test_status("Playing TTS stream");
+  }
+  
+  // Task is done, delete itself
+  vTaskDelete(NULL);
 }
 
 static bool play_elevenlabs_stream_via_audio_library()
 {
-  String url = "https://api.elevenlabs.io/v1/text-to-speech/";
-  url += ELEVENLABS_VOICE_ID;
-  url += "/stream?output_format=";
-  url += ELEVENLABS_OUTPUT_FORMAT;
-  url += "&model_id=";
-  url += url_encode_component(String(ELEVENLABS_MODEL_ID));
-  url += "&text=";
-  url += url_encode_component(String(ELEVENLABS_TEST_TEXT));
-  url += "&xi_api_key=";
-  url += url_encode_component(String(ELEVENLABS_API_KEY));
-
   audio.stopSong();
-  bool ok = audio.connecttohost(url.c_str());
+  bool ok = audio.connecttoelevenlabs(
+    ELEVENLABS_TEST_TEXT,
+    ELEVENLABS_API_KEY,
+    ELEVENLABS_VOICE_ID,
+    ELEVENLABS_MODEL_ID
+  );
   if (!ok)
   {
-    Serial.println("Audio library failed to open ElevenLabs stream URL");
+    Serial.println("Audio library connecttoelevenlabs failed");
     return false;
   }
   return true;
@@ -443,16 +346,19 @@ static bool request_elevenlabs_stream_test()
   audio.stopSong();
   delay(50);
 
-  Serial.println("TTS mode: audio library stream");
-  set_test_status("Requesting TTS stream...");
-  bool ok = play_elevenlabs_stream_via_audio_library();
-  if (!ok)
-  {
-    set_test_status("TTS stream failed");
-    return false;
-  }
-
-  set_test_status("Playing TTS stream");
+  Serial.println("TTS mode: connecttoelevenlabs");
+  set_test_status("Connecting to TTS...");
+  
+  // Create background task for TTS connection (prevents UI freeze)
+  xTaskCreate(
+    tts_connect_task,    // Task function
+    "TTS_Connect",       // Task name
+    8192,                // Stack size (bytes)
+    NULL,                // Parameters
+    1,                   // Priority
+    NULL                 // Task handle
+  );
+  
   return true;
 }
 
@@ -691,86 +597,10 @@ void setup()
   indev_drv.read_cb = my_touchpad_read;
   lv_indev_drv_register( &indev_drv );
 
-
-
   ui_init();//开机UI界面
-  while (1)
-  {
-    audio.loop();
-
-    if (goto_widget_flag == 1)//进入widget
-    {
-      if (ticker1.active() == true)
-      {
-        ticker1.detach();
-      }
-      goto_widget_flag = 0;
-      delay(300);
-      break;
-    }
-
-    if (goto_widget_flag == 3)//进入触摸界面，先把进度条线程关闭
-    {
-      bar_flag = 0; //停止进度条标志
-      if (ticker1.active() == true)
-      {
-        ticker1.detach();
-      }
-      if (first_flag == 0 || first_flag == 1)
-      {
-        label_xy();
-        first_flag = 2;
-      }
-      if (zero_clean == 1)
-      {
-        touchX = 0;
-        touchY = 0;
-        zero_clean = 0;
-      }
-      lv_label_set_text(ui_Label, "Touch Adjust:");
-      lv_label_set_text_fmt(ui_Label3, "%d  %d", touchX, touchY); //显示触摸信息
-    }
-
-    if (goto_widget_flag == 4)//触摸界面返回到Menu界面,使进度条加满
-    {
-      val = 100;
-      delay(100);
-      ticker1.attach_ms(35, callback1);//每35ms调用callback1
-      goto_widget_flag = 0;
-    }
-
-    if (goto_widget_flag == 5) //触发校准信号
-    {
-      lv_scr_load_anim(ui_touch_calibrate, LV_SCR_LOAD_ANIM_NONE, 0, 0, false);
-      lv_timer_handler();
-      lv_timer_handler();
-      delay(100);
-      touch_calibrate();//触摸校准
-      lcd.setTouch( calData );
-      lv_scr_load_anim(ui_TOUCH, LV_SCR_LOAD_ANIM_NONE, 0, 0, false);
-      lv_timer_handler();
-      goto_widget_flag = 3; //进入触摸界面标志
-      touchX = 0;
-      touchY = 0;
-    }
-
-    if (bar_flag == 6)//刚开机进入Menu界面时运行进度条一次，之后就不再运行
-    {
-      if (first_flag == 0)
-      {
-        lv_example_bar();
-        ticker1.attach_ms(35, callback1);//每35ms调用callback1
-        first_flag = 1;
-      }
-    }
-
-    lv_timer_handler();
-  }
-
-
-  lcd.fillScreen(TFT_BLACK);
-  lv_demo_widgets();//主UI界面
+  lv_timer_handler();
   create_test_button();
+  set_test_status("Audio test ready");
   Serial.println( "Setup done" );
 }
 
