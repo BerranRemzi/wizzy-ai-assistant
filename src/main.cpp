@@ -75,6 +75,7 @@ static constexpr uint32_t TTS_DRAIN_BUFFER_BYTES = 256;
 static lv_obj_t * test_status_label = NULL;
 static bool sd_ready = false;
 static uint8_t audio_volume_level = AUDIO_LIB_VOLUME;
+static SPIClass sd_spi(HSPI);
 Audio audio(true, I2S_DAC_CHANNEL_LEFT_EN);
 static WiFiServer tts_bridge_server(TTS_BRIDGE_PORT);
 static volatile bool tts_stream_active = false;
@@ -204,8 +205,9 @@ void listDir(fs::FS & fs, const char *dirname, uint8_t levels)
 //SD卡初始化
 int SD_init()
 {
-
-  if (!SD.begin(SD_CS))
+  // Keep SD on a dedicated SPI bus so TFT/touch bus pin mapping remains untouched.
+  sd_spi.begin(SD_SCK, SD_MISO, SD_MOSI, SD_CS);
+  if (!SD.begin(SD_CS, sd_spi))
   {
     Serial.println("Card Mount Failed");
     return 1;
@@ -709,7 +711,6 @@ static bool request_sd_file_test(const char *path)
 {
   if (!sd_ready)
   {
-    SPI.begin(SD_SCK, SD_MISO, SD_MOSI);
     if (SD_init() != 0)
     {
       set_test_status("SD init failed");
