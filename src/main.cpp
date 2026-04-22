@@ -47,7 +47,6 @@
 #include <SPI.h>
 #include <SD.h>
 #include <FS.h>
-#include <driver/i2s.h>
 //UI
 #include "ui.h"
 
@@ -64,23 +63,24 @@ static constexpr uint8_t MIC_ADC_PIN = 25;
 static constexpr uint8_t RECORD_BUTTON_PIN = 32;
 static constexpr uint8_t SPEAKER_PIN = 26;
 static constexpr uint8_t AUDIO_LIB_VOLUME = 21; 
-static constexpr uint8_t AUDIO_RAMP_STEP_DELAY_MS = 3;
-static constexpr uint16_t DAC_BIAS_SAMPLES = 96;
-static constexpr uint16_t DAC_IDLE_BLOCK_SAMPLES = 64;
 static constexpr uint16_t TOUCH_THRESHOLD = 600;
 static constexpr uint16_t TTS_BRIDGE_PORT = 8081;
 static constexpr uint32_t TTS_DRAIN_MIN_MS = 1000;
 static constexpr uint32_t TTS_DRAIN_FORCE_MS = 12000;
 static constexpr uint32_t TTS_DRAIN_BUFFER_BYTES = 256;
+static constexpr uint32_t STARTUP_RAMP_TEST_PLAY_MS = 1800;
+static constexpr uint16_t MANUAL_RAMP_SLOW_STEPS = 512;
+static constexpr uint16_t MANUAL_RAMP_SLOW_HOLD_SAMPLES = 256;
 static lv_obj_t * test_status_label = NULL;
 static bool sd_ready = false;
-static uint8_t audio_volume_level = AUDIO_LIB_VOLUME;
 static SPIClass sd_spi(HSPI);
 Audio audio(true, I2S_DAC_CHANNEL_LEFT_EN);
 static WiFiServer tts_bridge_server(TTS_BRIDGE_PORT);
 static volatile bool tts_stream_active = false;
 static volatile bool tts_bridge_finished = false;
 static volatile uint32_t tts_bridge_finished_at_ms = 0;
+static bool startup_ramp_test_active = false;
+static uint32_t startup_ramp_test_started_at_ms = 0;
 
 //2.4
 #define SD_MOSI 23
@@ -292,86 +292,10 @@ static void set_test_status(const char *text)
   }
 }
 
-static void set_audio_volume(uint8_t level)
-{
-  if (level > AUDIO_LIB_VOLUME)
-  {
-    level = AUDIO_LIB_VOLUME;
-  }
-  audio.setVolume(level);
-  audio_volume_level = level;
-}
-
-static void ramp_audio_volume(uint8_t from, uint8_t to)
-{
-  if (from > AUDIO_LIB_VOLUME) from = AUDIO_LIB_VOLUME;
-  if (to > AUDIO_LIB_VOLUME) to = AUDIO_LIB_VOLUME;
-
-  if (from == to)
-  {
-    set_audio_volume(to);
-    return;
-  }
-
-  set_audio_volume(from);
-  if (from < to)
-  {
-    for (uint8_t v = from + 1; v <= to; ++v)
-    {
-      set_audio_volume(v);
-      delay(AUDIO_RAMP_STEP_DELAY_MS);
-    }
-  }
-  else
-  {
-    for (int v = (int)from - 1; v >= (int)to; --v)
-    {
-      set_audio_volume((uint8_t)v);
-      delay(AUDIO_RAMP_STEP_DELAY_MS);
-    }
-  }
-}
-
-static void bias_dac_midpoint(uint16_t samples)
-{
-  const uint32_t mid = 0x80008000UL;
-  size_t written = 0;
-  i2s_port_t port = (i2s_port_t)audio.getI2sPort();
-  for (uint16_t n = 0; n < samples; ++n)
-  {
-    i2s_write(port, &mid, sizeof(mid), &written, 10);
-  }
-}
-
-static void feed_dac_midpoint_idle()
-{
-  if (audio.isRunning())
-  {
-    return;
-  }
-
-  // Internal DAC can fall to code 0 on I2S underrun; keep queue biased at midscale.
-  static uint32_t mid_block[DAC_IDLE_BLOCK_SAMPLES];
-  static bool mid_block_init = false;
-  if (!mid_block_init)
-  {
-    for (uint16_t n = 0; n < DAC_IDLE_BLOCK_SAMPLES; ++n)
-    {
-      mid_block[n] = 0x80008000UL;
-    }
-    mid_block_init = true;
-  }
-
-  size_t written = 0;
-  i2s_write((i2s_port_t)audio.getI2sPort(), mid_block, sizeof(mid_block), &written, 0);
-}
-
 static void stop_audio_soft()
 {
-  ramp_audio_volume(audio_volume_level, 0);
+  audio.setVolume(0);
   audio.stopSong();
-  // Keep internal DAC close to midscale after stop to reduce edge pops.
-  bias_dac_midpoint(DAC_BIAS_SAMPLES);
 }
 
 static String json_escape(const char *text)
@@ -667,12 +591,12 @@ static bool request_elevenlabs_stream_test()
   String local_url = "http://" + WiFi.localIP().toString() + ":" + String(TTS_BRIDGE_PORT) + "/tts";
   if (!audio.connecttohost(local_url.c_str()))
   {
-    set_audio_volume(AUDIO_LIB_VOLUME);
+    audio.setVolume(AUDIO_LIB_VOLUME);
     set_test_status("TTS bridge connect failed");
     return false;
   }
 
-  ramp_audio_volume(0, AUDIO_LIB_VOLUME);
+  audio.setVolume(AUDIO_LIB_VOLUME);
   set_test_status("Playing TTS stream");
   tts_stream_active = true;
   
@@ -695,13 +619,13 @@ static bool request_http_stream_test(const char *url, const char *name)
   stop_audio_soft();
   if (!audio.connecttohost(url))
   {
-    set_audio_volume(AUDIO_LIB_VOLUME);
+    audio.setVolume(AUDIO_LIB_VOLUME);
     Serial.printf("%s stream failed\n", name);
     set_test_status("Stream failed");
     return false;
   }
 
-  ramp_audio_volume(0, AUDIO_LIB_VOLUME);
+  audio.setVolume(AUDIO_LIB_VOLUME);
   Serial.printf("Playing %s stream\n", name);
   set_test_status("Playing stream");
   return true;
@@ -722,16 +646,30 @@ static bool request_sd_file_test(const char *path)
   stop_audio_soft();
   if (!audio.connecttoFS(SD, path))
   {
-    set_audio_volume(AUDIO_LIB_VOLUME);
+    audio.setVolume(AUDIO_LIB_VOLUME);
     Serial.printf("Failed to play SD file: %s\n", path);
     set_test_status("SD file failed");
     return false;
   }
 
-  ramp_audio_volume(0, AUDIO_LIB_VOLUME);
+  audio.setVolume(AUDIO_LIB_VOLUME);
   Serial.printf("Playing SD file: %s\n", path);
   set_test_status("Playing SD audio");
   return true;
+}
+
+static void run_startup_ramp_test()
+{
+  set_test_status("Startup ramp test: ramp-up");
+  if (request_sd_file_test("/audio/adv_02.mp3"))
+  {
+    startup_ramp_test_active = true;
+    startup_ramp_test_started_at_ms = millis();
+  }
+  else
+  {
+    startup_ramp_test_active = false;
+  }
 }
 
 static void handle_serial_command(char cmd)
@@ -753,13 +691,27 @@ static void handle_serial_command(char cmd)
       set_test_status("Requesting TTS stream...");
       request_elevenlabs_stream_test();
       break;
+    case 't':
+      Serial.println("Serial cmd t: ramp-up/down test with SD file");
+      stop_audio_soft();
+      startup_ramp_test_active = false;
+      run_startup_ramp_test();
+      break;
+    case 'T':
+      Serial.println("Serial cmd T: slow DAC ramp-up/down only");
+      stop_audio_soft();
+      startup_ramp_test_active = false;
+      set_test_status("Slow DAC ramp cycle");
+      audio.runInternalDACBiasCycle(MANUAL_RAMP_SLOW_STEPS, MANUAL_RAMP_SLOW_HOLD_SAMPLES);
+      set_test_status("Slow DAC ramp complete");
+      break;
     case '\r':
     case '\n':
     case ' ':
       break;
     default:
       Serial.printf("Unknown serial command: %c\n", cmd);
-      Serial.println("Use: 1=play radio, 2=play test, 3=elevenlabs test");
+      Serial.println("Use: 1=play radio, 2=play test, 3=elevenlabs test, t=SD ramp test, T=slow DAC ramp");
       break;
   }
 }
@@ -878,7 +830,6 @@ void audio_eof_stream(const char *info)
 {
   Serial.print("audio_eof_stream: ");
   Serial.println(info ? info : "");
-  bias_dac_midpoint(DAC_BIAS_SAMPLES);
   if (tts_stream_active)
   {
     tts_stream_active = false;
@@ -892,7 +843,6 @@ void audio_eof_mp3(const char *info)
 {
   Serial.print("audio_eof_mp3: ");
   Serial.println(info ? info : "");
-  bias_dac_midpoint(DAC_BIAS_SAMPLES);
   if (tts_stream_active)
   {
     tts_stream_active = false;
@@ -966,8 +916,8 @@ void setup()
   // Push-to-talk button: active-low on GPIO32.
   pinMode(RECORD_BUTTON_PIN, INPUT_PULLUP);
 
-  set_audio_volume(AUDIO_LIB_VOLUME); // 0..21
-  bias_dac_midpoint(DAC_BIAS_SAMPLES);
+  audio.setInternalDACBiasRamp(128, 96);
+  audio.setVolume(AUDIO_LIB_VOLUME); // 0..21
 
   wifi_flag = connect_wifi_from_sources() ? 1 : 0;
 
@@ -1045,9 +995,8 @@ void setup()
   );
 
   set_test_status("Audio test ready");
-  bias_dac_midpoint(DAC_BIAS_SAMPLES * 4);
-  request_sd_file_test("/audio/adv_02.mp3");
-  Serial.println("Serial commands: 1=play radio, 2=play test, 3=elevenlabs test");
+  run_startup_ramp_test();
+  Serial.println("Serial commands: 1=play radio, 2=play test, 3=elevenlabs test, t=SD ramp test, T=slow DAC ramp");
   Serial.println( "Setup done" );
 }
 
@@ -1060,7 +1009,6 @@ void loop()
   }
 
   audio.loop();
-  feed_dac_midpoint_idle();
 
   if (tts_stream_active && tts_bridge_finished)
   {
@@ -1081,6 +1029,18 @@ void loop()
     }
   }
 
+  if (startup_ramp_test_active)
+  {
+    uint32_t now = millis();
+    if ((now - startup_ramp_test_started_at_ms) >= STARTUP_RAMP_TEST_PLAY_MS)
+    {
+      set_test_status("Startup ramp test: ramp-down");
+      stop_audio_soft();
+      startup_ramp_test_active = false;
+      set_test_status("Startup ramp test complete");
+    }
+  }
+
   lv_timer_handler();
-  delay(1);
+  //delay(1);
 }
