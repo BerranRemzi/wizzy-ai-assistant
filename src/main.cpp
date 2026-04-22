@@ -47,6 +47,7 @@
 #include <SPI.h>
 #include <SD.h>
 #include <FS.h>
+#include <driver/i2s.h>
 //UI
 #include "ui.h"
 
@@ -63,11 +64,17 @@ static constexpr uint8_t MIC_ADC_PIN = 25;
 static constexpr uint8_t RECORD_BUTTON_PIN = 32;
 static constexpr uint8_t SPEAKER_PIN = 26;
 static constexpr uint8_t AUDIO_LIB_VOLUME = 21; 
+static constexpr uint8_t AUDIO_RAMP_STEP_DELAY_MS = 3;
+static constexpr uint16_t DAC_BIAS_SAMPLES = 96;
+static constexpr uint16_t DAC_IDLE_BLOCK_SAMPLES = 64;
+static constexpr uint16_t TOUCH_THRESHOLD = 600;
 static constexpr uint16_t TTS_BRIDGE_PORT = 8081;
 static constexpr uint32_t TTS_DRAIN_MIN_MS = 1000;
 static constexpr uint32_t TTS_DRAIN_FORCE_MS = 12000;
 static constexpr uint32_t TTS_DRAIN_BUFFER_BYTES = 256;
 static lv_obj_t * test_status_label = NULL;
+static bool sd_ready = false;
+static uint8_t audio_volume_level = AUDIO_LIB_VOLUME;
 Audio audio(true, I2S_DAC_CHANNEL_LEFT_EN);
 static WiFiServer tts_bridge_server(TTS_BRIDGE_PORT);
 static volatile bool tts_stream_active = false;
@@ -111,7 +118,7 @@ uint16_t touchX, touchY;
 /*读取触摸板*/
 void my_touchpad_read( lv_indev_drv_t * indev_driver, lv_indev_data_t * data )
 {
-  bool touched = lcd.getTouch( &touchX, &touchY, 600);
+  bool touched = lcd.getTouch( &touchX, &touchY, TOUCH_THRESHOLD);
   if ( !touched )
   {
     data->state = LV_INDEV_STATE_REL;
@@ -123,12 +130,6 @@ void my_touchpad_read( lv_indev_drv_t * indev_driver, lv_indev_data_t * data )
     /*设置坐标*/
     data->point.x = touchX;
     data->point.y = touchY;
-
-    Serial.print( "Data x " );
-    Serial.println( touchX );
-
-    Serial.print( "Data y " );
-    Serial.println( touchY );
   }
 }
 
@@ -287,6 +288,88 @@ static void set_test_status(const char *text)
   {
     lv_label_set_text(test_status_label, text);
   }
+}
+
+static void set_audio_volume(uint8_t level)
+{
+  if (level > AUDIO_LIB_VOLUME)
+  {
+    level = AUDIO_LIB_VOLUME;
+  }
+  audio.setVolume(level);
+  audio_volume_level = level;
+}
+
+static void ramp_audio_volume(uint8_t from, uint8_t to)
+{
+  if (from > AUDIO_LIB_VOLUME) from = AUDIO_LIB_VOLUME;
+  if (to > AUDIO_LIB_VOLUME) to = AUDIO_LIB_VOLUME;
+
+  if (from == to)
+  {
+    set_audio_volume(to);
+    return;
+  }
+
+  set_audio_volume(from);
+  if (from < to)
+  {
+    for (uint8_t v = from + 1; v <= to; ++v)
+    {
+      set_audio_volume(v);
+      delay(AUDIO_RAMP_STEP_DELAY_MS);
+    }
+  }
+  else
+  {
+    for (int v = (int)from - 1; v >= (int)to; --v)
+    {
+      set_audio_volume((uint8_t)v);
+      delay(AUDIO_RAMP_STEP_DELAY_MS);
+    }
+  }
+}
+
+static void bias_dac_midpoint(uint16_t samples)
+{
+  const uint32_t mid = 0x80008000UL;
+  size_t written = 0;
+  i2s_port_t port = (i2s_port_t)audio.getI2sPort();
+  for (uint16_t n = 0; n < samples; ++n)
+  {
+    i2s_write(port, &mid, sizeof(mid), &written, 10);
+  }
+}
+
+static void feed_dac_midpoint_idle()
+{
+  if (audio.isRunning())
+  {
+    return;
+  }
+
+  // Internal DAC can fall to code 0 on I2S underrun; keep queue biased at midscale.
+  static uint32_t mid_block[DAC_IDLE_BLOCK_SAMPLES];
+  static bool mid_block_init = false;
+  if (!mid_block_init)
+  {
+    for (uint16_t n = 0; n < DAC_IDLE_BLOCK_SAMPLES; ++n)
+    {
+      mid_block[n] = 0x80008000UL;
+    }
+    mid_block_init = true;
+  }
+
+  size_t written = 0;
+  i2s_write((i2s_port_t)audio.getI2sPort(), mid_block, sizeof(mid_block), &written, 0);
+}
+
+static void stop_audio_soft()
+{
+  ramp_audio_volume(audio_volume_level, 0);
+  audio.stopSong();
+  // Keep internal DAC close to midscale after stop to reduce edge pops.
+  bias_dac_midpoint(DAC_BIAS_SAMPLES);
 }
 
 static String json_escape(const char *text)
@@ -570,7 +653,7 @@ static bool request_elevenlabs_stream_test()
   }
 
   // Free current stream/network resources before opening TTS stream.
-  audio.stopSong();
+  stop_audio_soft();
   tts_stream_active = false;
   tts_bridge_finished = false;
   tts_bridge_finished_at_ms = 0;
@@ -582,10 +665,12 @@ static bool request_elevenlabs_stream_test()
   String local_url = "http://" + WiFi.localIP().toString() + ":" + String(TTS_BRIDGE_PORT) + "/tts";
   if (!audio.connecttohost(local_url.c_str()))
   {
+    set_audio_volume(AUDIO_LIB_VOLUME);
     set_test_status("TTS bridge connect failed");
     return false;
   }
 
+  ramp_audio_volume(0, AUDIO_LIB_VOLUME);
   set_test_status("Playing TTS stream");
   tts_stream_active = true;
   
@@ -605,16 +690,46 @@ static bool request_http_stream_test(const char *url, const char *name)
   }
 
   // Always stop current stream before switching to another station.
-  audio.stopSong();
+  stop_audio_soft();
   if (!audio.connecttohost(url))
   {
+    set_audio_volume(AUDIO_LIB_VOLUME);
     Serial.printf("%s stream failed\n", name);
     set_test_status("Stream failed");
     return false;
   }
 
+  ramp_audio_volume(0, AUDIO_LIB_VOLUME);
   Serial.printf("Playing %s stream\n", name);
   set_test_status("Playing stream");
+  return true;
+}
+
+static bool request_sd_file_test(const char *path)
+{
+  if (!sd_ready)
+  {
+    SPI.begin(SD_SCK, SD_MISO, SD_MOSI);
+    if (SD_init() != 0)
+    {
+      set_test_status("SD init failed");
+      return false;
+    }
+    sd_ready = true;
+  }
+
+  stop_audio_soft();
+  if (!audio.connecttoFS(SD, path))
+  {
+    set_audio_volume(AUDIO_LIB_VOLUME);
+    Serial.printf("Failed to play SD file: %s\n", path);
+    set_test_status("SD file failed");
+    return false;
+  }
+
+  ramp_audio_volume(0, AUDIO_LIB_VOLUME);
+  Serial.printf("Playing SD file: %s\n", path);
+  set_test_status("Playing SD audio");
   return true;
 }
 
@@ -650,35 +765,54 @@ static void handle_serial_command(char cmd)
 
 static void on_test_button_event(lv_event_t *e)
 {
-  if (lv_event_get_code(e) != LV_EVENT_CLICKED)
+  lv_event_code_t code = lv_event_get_code(e);
+  if (code != LV_EVENT_CLICKED && code != LV_EVENT_PRESSED)
   {
     return;
   }
 
+  Serial.println("UI: TTS button clicked");
   set_test_status("Requesting stream...");
   request_elevenlabs_stream_test();
 }
 
 static void on_ndr_button_event(lv_event_t *e)
 {
-  if (lv_event_get_code(e) != LV_EVENT_CLICKED)
+  lv_event_code_t code = lv_event_get_code(e);
+  if (code != LV_EVENT_CLICKED && code != LV_EVENT_PRESSED)
   {
     return;
   }
 
+  Serial.println("UI: NDR button clicked");
   set_test_status("Requesting NDR stream...");
   request_http_stream_test(ICECAST_TEST_URL, "NDR");
 }
 
 static void on_nrj_button_event(lv_event_t *e)
 {
-  if (lv_event_get_code(e) != LV_EVENT_CLICKED)
+  lv_event_code_t code = lv_event_get_code(e);
+  if (code != LV_EVENT_CLICKED && code != LV_EVENT_PRESSED)
   {
     return;
   }
 
+  Serial.println("UI: NRJ button clicked");
   set_test_status("Requesting NRJ stream...");
   request_http_stream_test(NRJ_TEST_URL, "NRJ");
+}
+
+static void on_sd_button_event(lv_event_t *e)
+{
+  lv_event_code_t code = lv_event_get_code(e);
+  if (code != LV_EVENT_CLICKED && code != LV_EVENT_PRESSED)
+  {
+    return;
+  }
+
+  Serial.println("UI: SD button clicked");
+  set_test_status("Requesting SD audio...");
+  request_sd_file_test("/audio/adv_02.mp3");
 }
 
 static void create_test_button()
@@ -711,6 +845,15 @@ static void create_test_button()
   lv_label_set_text(nrj_label, "NRJ");
   lv_obj_center(nrj_label);
 
+  lv_obj_t *sd_button = lv_btn_create(screen);
+  lv_obj_set_size(sd_button, 92, 44);
+  lv_obj_align(sd_button, LV_ALIGN_BOTTOM_RIGHT, -10, -60);
+  lv_obj_add_event_cb(sd_button, on_sd_button_event, LV_EVENT_ALL, NULL);
+
+  lv_obj_t *sd_label = lv_label_create(sd_button);
+  lv_label_set_text(sd_label, "SD");
+  lv_obj_center(sd_label);
+
   test_status_label = lv_label_create(screen);
   lv_obj_set_width(test_status_label, 220);
   lv_label_set_long_mode(test_status_label, LV_LABEL_LONG_CLIP);
@@ -734,6 +877,7 @@ void audio_eof_stream(const char *info)
 {
   Serial.print("audio_eof_stream: ");
   Serial.println(info ? info : "");
+  bias_dac_midpoint(DAC_BIAS_SAMPLES);
   if (tts_stream_active)
   {
     tts_stream_active = false;
@@ -747,6 +891,7 @@ void audio_eof_mp3(const char *info)
 {
   Serial.print("audio_eof_mp3: ");
   Serial.println(info ? info : "");
+  bias_dac_midpoint(DAC_BIAS_SAMPLES);
   if (tts_stream_active)
   {
     tts_stream_active = false;
@@ -820,7 +965,8 @@ void setup()
   // Push-to-talk button: active-low on GPIO32.
   pinMode(RECORD_BUTTON_PIN, INPUT_PULLUP);
 
-  audio.setVolume(AUDIO_LIB_VOLUME); // 0..21
+  set_audio_volume(AUDIO_LIB_VOLUME); // 0..21
+  bias_dac_midpoint(DAC_BIAS_SAMPLES);
 
   wifi_flag = connect_wifi_from_sources() ? 1 : 0;
 
@@ -898,7 +1044,8 @@ void setup()
   );
 
   set_test_status("Audio test ready");
-  request_elevenlabs_stream_test();
+  bias_dac_midpoint(DAC_BIAS_SAMPLES * 4);
+  request_sd_file_test("/audio/adv_02.mp3");
   Serial.println("Serial commands: 1=play radio, 2=play test, 3=elevenlabs test");
   Serial.println( "Setup done" );
 }
@@ -912,6 +1059,7 @@ void loop()
   }
 
   audio.loop();
+  feed_dac_midpoint_idle();
 
   if (tts_stream_active && tts_bridge_finished)
   {
@@ -924,7 +1072,7 @@ void loop()
     if ((elapsed >= TTS_DRAIN_MIN_MS && buffered <= TTS_DRAIN_BUFFER_BYTES) ||
         (elapsed >= TTS_DRAIN_FORCE_MS))
     {
-      audio.stopSong();
+      stop_audio_soft();
       tts_stream_active = false;
       tts_bridge_finished = false;
       tts_bridge_finished_at_ms = 0;
