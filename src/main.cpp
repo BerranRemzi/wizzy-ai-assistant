@@ -5,6 +5,8 @@
 #include <WiFiClientSecure.h>
 #include <Preferences.h>
 #include <Audio.h>
+#include <ArduinoJson.h>
+#include <vector>
 
 #if __has_include("secrets.h")
 #  include "secrets.h"
@@ -71,6 +73,8 @@ static constexpr uint32_t TTS_DRAIN_BUFFER_BYTES = 256;
 static constexpr uint32_t STARTUP_RAMP_TEST_PLAY_MS = 1800;
 static constexpr uint16_t MANUAL_RAMP_SLOW_STEPS = 512;
 static constexpr uint16_t MANUAL_RAMP_SLOW_HOLD_SAMPLES = 256;
+static constexpr const char *PLAYLIST_JSON_PATH = "/audio/list.json";
+static constexpr const char *PLAYLIST_AUDIO_BASE = "/audio/";
 static lv_obj_t * test_status_label = NULL;
 static bool sd_ready = false;
 static SPIClass sd_spi(HSPI);
@@ -81,6 +85,33 @@ static volatile bool tts_bridge_finished = false;
 static volatile uint32_t tts_bridge_finished_at_ms = 0;
 static bool startup_ramp_test_active = false;
 static uint32_t startup_ramp_test_started_at_ms = 0;
+
+struct PlaylistEntry
+{
+  String text;
+  String file;
+};
+
+static std::vector<PlaylistEntry> section_obrashenija;
+static std::vector<PlaylistEntry> section_wake_up;
+static std::vector<PlaylistEntry> section_school_reminder;
+static std::vector<PlaylistEntry> section_fun;
+static std::vector<PlaylistEntry> section_threat;
+static std::vector<PlaylistEntry> section_adventure;
+static std::vector<PlaylistEntry> section_sleep;
+static std::vector<PlaylistEntry> section_evening;
+static std::vector<PlaylistEntry> section_system;
+
+static std::vector<PlaylistEntry> pool_morning;
+static std::vector<PlaylistEntry> pool_day;
+static std::vector<PlaylistEntry> pool_night;
+static std::vector<PlaylistEntry> pool_surprise;
+
+static bool playlist_loaded = false;
+static bool first_mode_click_needs_obrashenija = true;
+static bool category_sequence_active = false;
+static bool category_waiting_for_followup = false;
+static String category_followup_path;
 
 //2.4
 #define SD_MOSI 23
@@ -296,6 +327,287 @@ static void stop_audio_soft()
 {
   audio.setVolume(0);
   audio.stopSong();
+}
+
+static uint32_t random_u32()
+{
+  return esp_random();
+}
+
+static bool ensure_sd_ready()
+{
+  if (!sd_ready)
+  {
+    if (SD_init() != 0)
+    {
+      set_test_status("SD init failed");
+      return false;
+    }
+    sd_ready = true;
+  }
+
+  return true;
+}
+
+static void clear_playlist_data()
+{
+  section_obrashenija.clear();
+  section_wake_up.clear();
+  section_school_reminder.clear();
+  section_fun.clear();
+  section_threat.clear();
+  section_adventure.clear();
+  section_sleep.clear();
+  section_evening.clear();
+  section_system.clear();
+  pool_morning.clear();
+  pool_day.clear();
+  pool_night.clear();
+  pool_surprise.clear();
+}
+
+static void append_section_entries(JsonArrayConst arr, std::vector<PlaylistEntry> &out)
+{
+  for (JsonObjectConst item : arr)
+  {
+    const char *text = item["text"] | "";
+    const char *file = item["file"] | "";
+    if (file == nullptr || file[0] == '\0')
+    {
+      continue;
+    }
+
+    PlaylistEntry entry;
+    entry.text = text;
+    entry.file = file;
+    out.push_back(entry);
+  }
+}
+
+static bool load_playlist_from_sd()
+{
+  if (!ensure_sd_ready())
+  {
+    return false;
+  }
+
+  File list_file = SD.open(PLAYLIST_JSON_PATH, FILE_READ);
+  if (!list_file)
+  {
+    Serial.printf("Failed to open playlist json: %s\n", PLAYLIST_JSON_PATH);
+    set_test_status("list.json open failed");
+    return false;
+  }
+
+  JsonDocument doc;
+  DeserializationError err = deserializeJson(doc, list_file);
+  list_file.close();
+  if (err)
+  {
+    Serial.printf("Playlist json parse failed: %s\n", err.c_str());
+    set_test_status("list.json parse failed");
+    return false;
+  }
+
+  clear_playlist_data();
+
+  append_section_entries(doc["obrashenija"].as<JsonArrayConst>(), section_obrashenija);
+  append_section_entries(doc["wake_up"].as<JsonArrayConst>(), section_wake_up);
+  append_section_entries(doc["school_reminder"].as<JsonArrayConst>(), section_school_reminder);
+  append_section_entries(doc["fun"].as<JsonArrayConst>(), section_fun);
+  append_section_entries(doc["threat"].as<JsonArrayConst>(), section_threat);
+  append_section_entries(doc["adventure"].as<JsonArrayConst>(), section_adventure);
+  append_section_entries(doc["sleep"].as<JsonArrayConst>(), section_sleep);
+  append_section_entries(doc["evening"].as<JsonArrayConst>(), section_evening);
+  append_section_entries(doc["system"].as<JsonArrayConst>(), section_system);
+
+  pool_morning.insert(pool_morning.end(), section_wake_up.begin(), section_wake_up.end());
+  pool_morning.insert(pool_morning.end(), section_school_reminder.begin(), section_school_reminder.end());
+
+  pool_day.insert(pool_day.end(), section_fun.begin(), section_fun.end());
+  pool_day.insert(pool_day.end(), section_threat.begin(), section_threat.end());
+  pool_day.insert(pool_day.end(), section_adventure.begin(), section_adventure.end());
+
+  pool_night.insert(pool_night.end(), section_sleep.begin(), section_sleep.end());
+  pool_night.insert(pool_night.end(), section_evening.begin(), section_evening.end());
+
+  pool_surprise.insert(pool_surprise.end(), section_obrashenija.begin(), section_obrashenija.end());
+  pool_surprise.insert(pool_surprise.end(), section_wake_up.begin(), section_wake_up.end());
+  pool_surprise.insert(pool_surprise.end(), section_school_reminder.begin(), section_school_reminder.end());
+  pool_surprise.insert(pool_surprise.end(), section_fun.begin(), section_fun.end());
+  pool_surprise.insert(pool_surprise.end(), section_threat.begin(), section_threat.end());
+  pool_surprise.insert(pool_surprise.end(), section_adventure.begin(), section_adventure.end());
+  pool_surprise.insert(pool_surprise.end(), section_sleep.begin(), section_sleep.end());
+  pool_surprise.insert(pool_surprise.end(), section_evening.begin(), section_evening.end());
+  pool_surprise.insert(pool_surprise.end(), section_system.begin(), section_system.end());
+
+  playlist_loaded = true;
+  Serial.printf(
+    "Playlist loaded: obr=%u, wake=%u, school=%u, fun=%u, threat=%u, adv=%u, sleep=%u, evening=%u, system=%u\n",
+    (unsigned)section_obrashenija.size(),
+    (unsigned)section_wake_up.size(),
+    (unsigned)section_school_reminder.size(),
+    (unsigned)section_fun.size(),
+    (unsigned)section_threat.size(),
+    (unsigned)section_adventure.size(),
+    (unsigned)section_sleep.size(),
+    (unsigned)section_evening.size(),
+    (unsigned)section_system.size());
+  return true;
+}
+
+static bool ensure_playlist_loaded()
+{
+  if (playlist_loaded)
+  {
+    return true;
+  }
+
+  return load_playlist_from_sd();
+}
+
+static String build_audio_path(const String &file_name)
+{
+  if (file_name.length() == 0)
+  {
+    return String();
+  }
+
+  if (file_name.startsWith("/"))
+  {
+    return file_name;
+  }
+
+  return String(PLAYLIST_AUDIO_BASE) + file_name;
+}
+
+static const PlaylistEntry* pick_random_entry(const std::vector<PlaylistEntry> &entries)
+{
+  if (entries.empty())
+  {
+    return nullptr;
+  }
+
+  uint32_t index = random_u32() % entries.size();
+  return &entries[index];
+}
+
+static bool request_sd_file_from_playlist_entry(const PlaylistEntry &entry)
+{
+  if (!ensure_sd_ready())
+  {
+    return false;
+  }
+
+  String full_path = build_audio_path(entry.file);
+  if (full_path.length() == 0)
+  {
+    set_test_status("Empty audio path");
+    return false;
+  }
+
+  if (!SD.exists(full_path.c_str()))
+  {
+    Serial.printf("Missing SD file: %s\n", full_path.c_str());
+    set_test_status("Audio file missing");
+    return false;
+  }
+
+  stop_audio_soft();
+  if (!audio.connecttoFS(SD, full_path.c_str()))
+  {
+    audio.setVolume(AUDIO_LIB_VOLUME);
+    Serial.printf("Failed to play SD file: %s\n", full_path.c_str());
+    set_test_status("SD file failed");
+    return false;
+  }
+
+  audio.setVolume(AUDIO_LIB_VOLUME);
+  Serial.printf("Playing SD file: %s\n", full_path.c_str());
+  if (entry.text.length() > 0)
+  {
+    set_test_status(entry.text.c_str());
+  }
+  else
+  {
+    set_test_status("Playing SD audio");
+  }
+
+  return true;
+}
+
+static bool play_random_from_pool(const std::vector<PlaylistEntry> &pool)
+{
+  const PlaylistEntry *entry = pick_random_entry(pool);
+  if (entry == nullptr)
+  {
+    set_test_status("Pool is empty");
+    return false;
+  }
+
+  return request_sd_file_from_playlist_entry(*entry);
+}
+
+static bool play_mode_pool(const std::vector<PlaylistEntry> &mode_pool)
+{
+  if (!ensure_playlist_loaded())
+  {
+    return false;
+  }
+
+  const PlaylistEntry *mode_entry = pick_random_entry(mode_pool);
+  if (mode_entry == nullptr)
+  {
+    set_test_status("Mode pool is empty");
+    return false;
+  }
+
+  if (first_mode_click_needs_obrashenija)
+  {
+    const PlaylistEntry *obr_entry = pick_random_entry(section_obrashenija);
+    if (obr_entry != nullptr)
+    {
+      String followup = build_audio_path(mode_entry->file);
+      if (followup.length() > 0)
+      {
+        category_followup_path = followup;
+        category_waiting_for_followup = true;
+        category_sequence_active = true;
+      }
+
+      first_mode_click_needs_obrashenija = false;
+      if (request_sd_file_from_playlist_entry(*obr_entry))
+      {
+        return true;
+      }
+
+      category_followup_path = "";
+      category_waiting_for_followup = false;
+      category_sequence_active = false;
+    }
+  }
+
+  first_mode_click_needs_obrashenija = false;
+  category_sequence_active = false;
+  category_waiting_for_followup = false;
+  category_followup_path = "";
+  return request_sd_file_from_playlist_entry(*mode_entry);
+}
+
+static bool play_startup_system_random()
+{
+  if (!ensure_playlist_loaded())
+  {
+    return false;
+  }
+
+  if (section_system.empty())
+  {
+    set_test_status("system section empty");
+    return false;
+  }
+
+  return play_random_from_pool(section_system);
 }
 
 static String json_escape(const char *text)
@@ -633,14 +945,9 @@ static bool request_http_stream_test(const char *url, const char *name)
 
 static bool request_sd_file_test(const char *path)
 {
-  if (!sd_ready)
+  if (!ensure_sd_ready())
   {
-    if (SD_init() != 0)
-    {
-      set_test_status("SD init failed");
-      return false;
-    }
-    sd_ready = true;
+    return false;
   }
 
   stop_audio_soft();
@@ -729,6 +1036,54 @@ static void on_test_button_event(lv_event_t *e)
   request_elevenlabs_stream_test();
 }
 
+static void on_sutrin_button_event(lv_event_t *e)
+{
+  lv_event_code_t code = lv_event_get_code(e);
+  if (code != LV_EVENT_CLICKED && code != LV_EVENT_PRESSED)
+  {
+    return;
+  }
+
+  Serial.println("UI: Сутрин clicked");
+  play_mode_pool(pool_morning);
+}
+
+static void on_den_button_event(lv_event_t *e)
+{
+  lv_event_code_t code = lv_event_get_code(e);
+  if (code != LV_EVENT_CLICKED && code != LV_EVENT_PRESSED)
+  {
+    return;
+  }
+
+  Serial.println("UI: Ден clicked");
+  play_mode_pool(pool_day);
+}
+
+static void on_nosht_button_event(lv_event_t *e)
+{
+  lv_event_code_t code = lv_event_get_code(e);
+  if (code != LV_EVENT_CLICKED && code != LV_EVENT_PRESSED)
+  {
+    return;
+  }
+
+  Serial.println("UI: Нощ clicked");
+  play_mode_pool(pool_night);
+}
+
+static void on_iznenada_button_event(lv_event_t *e)
+{
+  lv_event_code_t code = lv_event_get_code(e);
+  if (code != LV_EVENT_CLICKED && code != LV_EVENT_PRESSED)
+  {
+    return;
+  }
+
+  Serial.println("UI: Изненада clicked");
+  play_mode_pool(pool_surprise);
+}
+
 static void on_ndr_button_event(lv_event_t *e)
 {
   lv_event_code_t code = lv_event_get_code(e);
@@ -771,47 +1126,47 @@ static void on_sd_button_event(lv_event_t *e)
 static void create_test_button()
 {
   lv_obj_t *screen = lv_scr_act();
-  lv_obj_t *test_button = lv_btn_create(screen);
-  lv_obj_set_size(test_button, 92, 44);
-  lv_obj_align(test_button, LV_ALIGN_BOTTOM_RIGHT, -10, -10);
-  lv_obj_add_event_cb(test_button, on_test_button_event, LV_EVENT_ALL, NULL);
+  lv_obj_t *sutrin_button = lv_btn_create(screen);
+  lv_obj_set_size(sutrin_button, 90, 42);
+  lv_obj_align(sutrin_button, LV_ALIGN_BOTTOM_LEFT, 10, -60);
+  lv_obj_add_event_cb(sutrin_button, on_sutrin_button_event, LV_EVENT_ALL, NULL);
 
-  lv_obj_t *test_label = lv_label_create(test_button);
-  lv_label_set_text(test_label, "TTS");
-  lv_obj_center(test_label);
+  lv_obj_t *sutrin_label = lv_label_create(sutrin_button);
+  lv_label_set_text(sutrin_label, "Сутрин");
+  lv_obj_center(sutrin_label);
 
-  lv_obj_t *ndr_button = lv_btn_create(screen);
-  lv_obj_set_size(ndr_button, 92, 44);
-  lv_obj_align(ndr_button, LV_ALIGN_BOTTOM_RIGHT, -108, -10);
-  lv_obj_add_event_cb(ndr_button, on_ndr_button_event, LV_EVENT_ALL, NULL);
+  lv_obj_t *den_button = lv_btn_create(screen);
+  lv_obj_set_size(den_button, 90, 42);
+  lv_obj_align(den_button, LV_ALIGN_BOTTOM_LEFT, 110, -60);
+  lv_obj_add_event_cb(den_button, on_den_button_event, LV_EVENT_ALL, NULL);
 
-  lv_obj_t *ndr_label = lv_label_create(ndr_button);
-  lv_label_set_text(ndr_label, "NDR");
-  lv_obj_center(ndr_label);
+  lv_obj_t *den_label = lv_label_create(den_button);
+  lv_label_set_text(den_label, "Ден");
+  lv_obj_center(den_label);
 
-  lv_obj_t *nrj_button = lv_btn_create(screen);
-  lv_obj_set_size(nrj_button, 92, 44);
-  lv_obj_align(nrj_button, LV_ALIGN_BOTTOM_RIGHT, -206, -10);
-  lv_obj_add_event_cb(nrj_button, on_nrj_button_event, LV_EVENT_ALL, NULL);
+  lv_obj_t *nosht_button = lv_btn_create(screen);
+  lv_obj_set_size(nosht_button, 90, 42);
+  lv_obj_align(nosht_button, LV_ALIGN_BOTTOM_LEFT, 210, -60);
+  lv_obj_add_event_cb(nosht_button, on_nosht_button_event, LV_EVENT_ALL, NULL);
 
-  lv_obj_t *nrj_label = lv_label_create(nrj_button);
-  lv_label_set_text(nrj_label, "NRJ");
-  lv_obj_center(nrj_label);
+  lv_obj_t *nosht_label = lv_label_create(nosht_button);
+  lv_label_set_text(nosht_label, "Нощ");
+  lv_obj_center(nosht_label);
 
-  lv_obj_t *sd_button = lv_btn_create(screen);
-  lv_obj_set_size(sd_button, 92, 44);
-  lv_obj_align(sd_button, LV_ALIGN_BOTTOM_RIGHT, -10, -60);
-  lv_obj_add_event_cb(sd_button, on_sd_button_event, LV_EVENT_ALL, NULL);
+  lv_obj_t *iznenada_button = lv_btn_create(screen);
+  lv_obj_set_size(iznenada_button, 140, 42);
+  lv_obj_align(iznenada_button, LV_ALIGN_BOTTOM_LEFT, 90, -10);
+  lv_obj_add_event_cb(iznenada_button, on_iznenada_button_event, LV_EVENT_ALL, NULL);
 
-  lv_obj_t *sd_label = lv_label_create(sd_button);
-  lv_label_set_text(sd_label, "SD");
-  lv_obj_center(sd_label);
+  lv_obj_t *iznenada_label = lv_label_create(iznenada_button);
+  lv_label_set_text(iznenada_label, "Изненада");
+  lv_obj_center(iznenada_label);
 
   test_status_label = lv_label_create(screen);
-  lv_obj_set_width(test_status_label, 220);
+  lv_obj_set_width(test_status_label, 300);
   lv_label_set_long_mode(test_status_label, LV_LABEL_LONG_CLIP);
-  lv_obj_align(test_status_label, LV_ALIGN_BOTTOM_LEFT, 10, -24);
-  lv_label_set_text(test_status_label, "Audio test ready");
+  lv_obj_align(test_status_label, LV_ALIGN_BOTTOM_LEFT, 10, -108);
+  lv_label_set_text(test_status_label, "Готово");
 }
 
 void audio_info(const char *info)
@@ -830,6 +1185,19 @@ void audio_eof_stream(const char *info)
 {
   Serial.print("audio_eof_stream: ");
   Serial.println(info ? info : "");
+  if (category_sequence_active && category_waiting_for_followup)
+  {
+    category_waiting_for_followup = false;
+    String path_to_play = category_followup_path;
+    category_followup_path = "";
+    category_sequence_active = false;
+    if (path_to_play.length() > 0)
+    {
+      request_sd_file_test(path_to_play.c_str());
+      return;
+    }
+  }
+
   if (tts_stream_active)
   {
     tts_stream_active = false;
@@ -843,6 +1211,19 @@ void audio_eof_mp3(const char *info)
 {
   Serial.print("audio_eof_mp3: ");
   Serial.println(info ? info : "");
+  if (category_sequence_active && category_waiting_for_followup)
+  {
+    category_waiting_for_followup = false;
+    String path_to_play = category_followup_path;
+    category_followup_path = "";
+    category_sequence_active = false;
+    if (path_to_play.length() > 0)
+    {
+      request_sd_file_test(path_to_play.c_str());
+      return;
+    }
+  }
+
   if (tts_stream_active)
   {
     tts_stream_active = false;
@@ -995,7 +1376,7 @@ void setup()
   );
 
   set_test_status("Audio test ready");
-  run_startup_ramp_test();
+  play_startup_system_random();
   Serial.println("Serial commands: 1=play radio, 2=play test, 3=elevenlabs test, t=SD ramp test, T=slow DAC ramp");
   Serial.println( "Setup done" );
 }
