@@ -7,6 +7,7 @@
 #include <Audio.h>
 #include <ArduinoJson.h>
 #include <vector>
+#include <esp_heap_caps.h>
 
 #if __has_include("secrets.h")
 #  include "secrets.h"
@@ -150,6 +151,7 @@ uint16_t touchX, touchY;
 /*读取触摸板*/
 void my_touchpad_read( lv_indev_drv_t * indev_driver, lv_indev_data_t * data )
 {
+#ifdef TOUCH_CS
   bool touched = lcd.getTouch( &touchX, &touchY, TOUCH_THRESHOLD);
   if ( !touched )
   {
@@ -163,6 +165,10 @@ void my_touchpad_read( lv_indev_drv_t * indev_driver, lv_indev_data_t * data )
     data->point.x = touchX;
     data->point.y = touchY;
   }
+#else
+  (void)indev_driver;
+  data->state = LV_INDEV_STATE_REL;
+#endif
 }
 
 
@@ -352,18 +358,49 @@ static bool ensure_sd_ready()
 static void clear_playlist_data()
 {
   section_obrashenija.clear();
+  section_obrashenija.shrink_to_fit();
   section_wake_up.clear();
+  section_wake_up.shrink_to_fit();
   section_school_reminder.clear();
+  section_school_reminder.shrink_to_fit();
   section_fun.clear();
+  section_fun.shrink_to_fit();
   section_threat.clear();
+  section_threat.shrink_to_fit();
   section_adventure.clear();
+  section_adventure.shrink_to_fit();
   section_sleep.clear();
+  section_sleep.shrink_to_fit();
   section_evening.clear();
+  section_evening.shrink_to_fit();
   section_system.clear();
+  section_system.shrink_to_fit();
   pool_morning.clear();
+  pool_morning.shrink_to_fit();
   pool_day.clear();
+  pool_day.shrink_to_fit();
   pool_night.clear();
+  pool_night.shrink_to_fit();
   pool_surprise.clear();
+  pool_surprise.shrink_to_fit();
+}
+
+static void unload_playlist_if_loaded()
+{
+  if (!playlist_loaded)
+  {
+    return;
+  }
+
+  clear_playlist_data();
+  playlist_loaded = false;
+  category_sequence_active = false;
+  category_waiting_for_followup = false;
+  category_followup_path = "";
+
+  Serial.printf("Playlist cache released. Free heap: %lu, largest block: %lu\n",
+                (unsigned long)heap_caps_get_free_size(MALLOC_CAP_8BIT),
+                (unsigned long)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
 }
 
 static void append_section_entries(JsonArrayConst arr, std::vector<PlaylistEntry> &out)
@@ -851,7 +888,7 @@ static void handle_tts_bridge_client(WiFiClient &downstream)
     }
   }
 
-  downstream.flush();
+  downstream.clear();
   upstream.stop();
   downstream.stop();
 
@@ -863,7 +900,7 @@ static void tts_bridge_task(void* parameter)
 {
   for (;;)
   {
-    WiFiClient client = tts_bridge_server.available();
+    WiFiClient client = tts_bridge_server.accept();
     if (client)
     {
       handle_tts_bridge_client(client);
@@ -892,6 +929,7 @@ static bool request_elevenlabs_stream_test()
 
   // Free current stream/network resources before opening TTS stream.
   stop_audio_soft();
+  unload_playlist_if_loaded();
   tts_stream_active = false;
   tts_bridge_finished = false;
   tts_bridge_finished_at_ms = 0;
@@ -929,6 +967,7 @@ static bool request_http_stream_test(const char *url, const char *name)
 
   // Always stop current stream before switching to another station.
   stop_audio_soft();
+  unload_playlist_if_loaded();
   if (!audio.connecttohost(url))
   {
     audio.setVolume(AUDIO_LIB_VOLUME);
@@ -1009,7 +1048,7 @@ static void handle_serial_command(char cmd)
       stop_audio_soft();
       startup_ramp_test_active = false;
       set_test_status("Slow DAC ramp cycle");
-      audio.runInternalDACBiasCycle(MANUAL_RAMP_SLOW_STEPS, MANUAL_RAMP_SLOW_HOLD_SAMPLES);
+      //audio.runInternalDACBiasCycle(MANUAL_RAMP_SLOW_STEPS, MANUAL_RAMP_SLOW_HOLD_SAMPLES);
       set_test_status("Slow DAC ramp complete");
       break;
     case '\r':
@@ -1256,8 +1295,13 @@ void touch_calibrate()//屏幕校准
   //  lcd.setTextFont(1);
   //  lcd.println();
   Serial.println("setTextFont(1)");
+#ifdef TOUCH_CS
   lcd.calibrateTouch(calData, TFT_MAGENTA, TFT_BLACK, 15);
   Serial.println("calibrateTouch(calData, TFT_MAGENTA, TFT_BLACK, 15)");
+#else
+  Serial.println("Touch disabled: define TOUCH_CS in TFT_eSPI setup to calibrate touch");
+  return;
+#endif
   Serial.println(); Serial.println();
   Serial.println("//在setup()中使用此校准代码:");
   Serial.print("uint16_t calData[5] = ");
@@ -1297,7 +1341,7 @@ void setup()
   // Push-to-talk button: active-low on GPIO32.
   pinMode(RECORD_BUTTON_PIN, INPUT_PULLUP);
 
-  audio.setInternalDACBiasRamp(128, 96);
+  //audio.setInternalDACBiasRamp(128, 96);
   audio.setVolume(AUDIO_LIB_VOLUME); // 0..21
 
   wifi_flag = connect_wifi_from_sources() ? 1 : 0;
@@ -1339,7 +1383,9 @@ void setup()
   //校准模式。一是四角定位、二是直接输入模拟数值直接定位
   //屏幕校准
   //  touch_calibrate();
+#ifdef TOUCH_CS
   lcd.setTouch( calData );
+#endif
 
 
   lv_disp_draw_buf_init( &draw_buf, buf1, NULL, screenWidth * screenHeight / 8 );
