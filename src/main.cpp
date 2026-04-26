@@ -403,6 +403,22 @@ static void unload_playlist_if_loaded()
                 (unsigned long)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
 }
 
+static void release_playlist_cache_for_playback()
+{
+  if (!playlist_loaded)
+  {
+    return;
+  }
+
+  // Keep category follow-up state intact; only free memory-heavy vectors.
+  clear_playlist_data();
+  playlist_loaded = false;
+
+  Serial.printf("Playlist vectors released for playback. Free heap: %lu, largest block: %lu\n",
+                (unsigned long)heap_caps_get_free_size(MALLOC_CAP_8BIT),
+                (unsigned long)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
+}
+
 static void append_section_entries(JsonArrayConst arr, std::vector<PlaylistEntry> &out)
 {
   for (JsonObjectConst item : arr)
@@ -550,6 +566,7 @@ static bool request_sd_file_from_playlist_entry(const PlaylistEntry &entry)
     return false;
   }
 
+  release_playlist_cache_for_playback();
   stop_audio_soft();
   if (!audio.connecttoFS(SD, full_path.c_str()))
   {
@@ -629,6 +646,66 @@ static bool play_mode_pool(const std::vector<PlaylistEntry> &mode_pool)
   category_waiting_for_followup = false;
   category_followup_path = "";
   return request_sd_file_from_playlist_entry(*mode_entry);
+}
+
+static bool play_random_obrashenija_plus_random_mode()
+{
+  if (!ensure_playlist_loaded())
+  {
+    return false;
+  }
+
+  const PlaylistEntry *obr_entry = pick_random_entry(section_obrashenija);
+  if (obr_entry == nullptr)
+  {
+    set_test_status("obrashenija section empty");
+    return false;
+  }
+
+  std::vector<const std::vector<PlaylistEntry>*> non_empty_mode_sections;
+  if (!section_wake_up.empty()) non_empty_mode_sections.push_back(&section_wake_up);
+  if (!section_school_reminder.empty()) non_empty_mode_sections.push_back(&section_school_reminder);
+  if (!section_fun.empty()) non_empty_mode_sections.push_back(&section_fun);
+  if (!section_threat.empty()) non_empty_mode_sections.push_back(&section_threat);
+  if (!section_adventure.empty()) non_empty_mode_sections.push_back(&section_adventure);
+  if (!section_sleep.empty()) non_empty_mode_sections.push_back(&section_sleep);
+  if (!section_evening.empty()) non_empty_mode_sections.push_back(&section_evening);
+
+  if (non_empty_mode_sections.empty())
+  {
+    set_test_status("mode sections are empty");
+    return false;
+  }
+
+  uint32_t section_index = random_u32() % non_empty_mode_sections.size();
+  const std::vector<PlaylistEntry> *chosen_section = non_empty_mode_sections[section_index];
+  const PlaylistEntry *mode_entry = pick_random_entry(*chosen_section);
+  if (mode_entry == nullptr)
+  {
+    set_test_status("mode entry missing");
+    return false;
+  }
+
+  String followup = build_audio_path(mode_entry->file);
+  if (followup.length() == 0)
+  {
+    set_test_status("mode path empty");
+    return false;
+  }
+
+  category_followup_path = followup;
+  category_waiting_for_followup = true;
+  category_sequence_active = true;
+
+  if (request_sd_file_from_playlist_entry(*obr_entry))
+  {
+    return true;
+  }
+
+  category_followup_path = "";
+  category_waiting_for_followup = false;
+  category_sequence_active = false;
+  return false;
 }
 
 static bool play_startup_system_random()
@@ -989,6 +1066,7 @@ static bool request_sd_file_test(const char *path)
     return false;
   }
 
+  release_playlist_cache_for_playback();
   stop_audio_soft();
   if (!audio.connecttoFS(SD, path))
   {
@@ -1022,6 +1100,11 @@ static void handle_serial_command(char cmd)
 {
   switch (cmd)
   {
+    case '0':
+      Serial.println("Serial cmd 0: random obrashenija + random mode");
+      set_test_status("Random obrashenija + mode...");
+      play_random_obrashenija_plus_random_mode();
+      break;
     case '1':
       Serial.println("Serial cmd 1: play radio");
       set_test_status("Requesting radio stream...");
@@ -1057,7 +1140,7 @@ static void handle_serial_command(char cmd)
       break;
     default:
       Serial.printf("Unknown serial command: %c\n", cmd);
-      Serial.println("Use: 1=play radio, 2=play test, 3=elevenlabs test, t=SD ramp test, T=slow DAC ramp");
+      Serial.println("Use: 0=obrashenija+mode, 1=play radio, 2=play test, 3=elevenlabs test, t=SD ramp test, T=slow DAC ramp");
       break;
   }
 }
@@ -1120,7 +1203,7 @@ static void on_iznenada_button_event(lv_event_t *e)
   }
 
   Serial.println("UI: Изненада clicked");
-  play_mode_pool(pool_surprise);
+  play_random_obrashenija_plus_random_mode();
 }
 
 static void on_ndr_button_event(lv_event_t *e)
@@ -1423,7 +1506,7 @@ void setup()
 
   set_test_status("Audio test ready");
   play_startup_system_random();
-  Serial.println("Serial commands: 1=play radio, 2=play test, 3=elevenlabs test, t=SD ramp test, T=slow DAC ramp");
+  Serial.println("Serial commands: 0=obrashenija+mode, 1=play radio, 2=play test, 3=elevenlabs test, t=SD ramp test, T=slow DAC ramp");
   Serial.println( "Setup done" );
 }
 
