@@ -6,6 +6,7 @@ Audio audio(true, I2S_DAC_CHANNEL_LEFT_EN);
 void audio_engine_stop_soft()
 {
     audio.stopSong();
+    audio.freeDecoderMemory();
     audio.clearDmaBuffer();
 }
 
