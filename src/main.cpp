@@ -4,7 +4,6 @@
 #include <Preferences.h>
 #include <Audio.h>
 #include <ArduinoJson.h>
-#include <vector>
 #include <esp_heap_caps.h>
 
 #if __has_include("secrets.h")
@@ -81,26 +80,35 @@ static volatile uint32_t tts_bridge_finished_at_ms = 0;
 static bool startup_ramp_test_active = false;
 static uint32_t startup_ramp_test_started_at_ms = 0;
 
-struct PlaylistEntry
-{
-  String text;
-  String file;
+// Playlist stored as a flat static array — no heap allocation, no String objects.
+#define PLAYLIST_NUM_SECTIONS 9
+#define PLAYLIST_MAX_ENTRIES  20
+#define PLAYLIST_MAX_FNAME    16   // e.g. "obr_01.mp3" fits in 16 chars
+
+enum PlaylistSection {
+  SEC_OBRASHENIJA = 0,
+  SEC_WAKE_UP,
+  SEC_SCHOOL,
+  SEC_FUN,
+  SEC_THREAT,
+  SEC_ADVENTURE,
+  SEC_SLEEP,
+  SEC_EVENING,
+  SEC_SYSTEM
 };
 
-static std::vector<PlaylistEntry> section_obrashenija;
-static std::vector<PlaylistEntry> section_wake_up;
-static std::vector<PlaylistEntry> section_school_reminder;
-static std::vector<PlaylistEntry> section_fun;
-static std::vector<PlaylistEntry> section_threat;
-static std::vector<PlaylistEntry> section_adventure;
-static std::vector<PlaylistEntry> section_sleep;
-static std::vector<PlaylistEntry> section_evening;
-static std::vector<PlaylistEntry> section_system;
+static char    g_section_files[PLAYLIST_NUM_SECTIONS][PLAYLIST_MAX_ENTRIES][PLAYLIST_MAX_FNAME];
+static uint8_t g_section_count[PLAYLIST_NUM_SECTIONS];
 
-static std::vector<PlaylistEntry> pool_morning;
-static std::vector<PlaylistEntry> pool_day;
-static std::vector<PlaylistEntry> pool_night;
-static std::vector<PlaylistEntry> pool_surprise;
+// Pools are compile-time arrays of section IDs — no data is copied.
+static const uint8_t POOL_MORNING[]  = { SEC_WAKE_UP, SEC_SCHOOL };
+static const uint8_t POOL_DAY[]      = { SEC_FUN, SEC_THREAT, SEC_ADVENTURE };
+static const uint8_t POOL_NIGHT[]    = { SEC_SLEEP, SEC_EVENING };
+static const uint8_t POOL_SURPRISE[] = { SEC_OBRASHENIJA, SEC_WAKE_UP, SEC_SCHOOL,
+                                         SEC_FUN, SEC_THREAT, SEC_ADVENTURE,
+                                         SEC_SLEEP, SEC_EVENING, SEC_SYSTEM };
+static const uint8_t MODE_SECTIONS[] = { SEC_WAKE_UP, SEC_SCHOOL, SEC_FUN,
+                                         SEC_THREAT, SEC_ADVENTURE, SEC_SLEEP, SEC_EVENING };
 
 static bool playlist_loaded = false;
 static bool first_mode_click_needs_obrashenija = true;
@@ -313,32 +321,7 @@ static bool ensure_sd_ready()
 
 static void clear_playlist_data()
 {
-  section_obrashenija.clear();
-  section_obrashenija.shrink_to_fit();
-  section_wake_up.clear();
-  section_wake_up.shrink_to_fit();
-  section_school_reminder.clear();
-  section_school_reminder.shrink_to_fit();
-  section_fun.clear();
-  section_fun.shrink_to_fit();
-  section_threat.clear();
-  section_threat.shrink_to_fit();
-  section_adventure.clear();
-  section_adventure.shrink_to_fit();
-  section_sleep.clear();
-  section_sleep.shrink_to_fit();
-  section_evening.clear();
-  section_evening.shrink_to_fit();
-  section_system.clear();
-  section_system.shrink_to_fit();
-  pool_morning.clear();
-  pool_morning.shrink_to_fit();
-  pool_day.clear();
-  pool_day.shrink_to_fit();
-  pool_night.clear();
-  pool_night.shrink_to_fit();
-  pool_surprise.clear();
-  pool_surprise.shrink_to_fit();
+  memset(g_section_count, 0, sizeof(g_section_count));
 }
 
 static void unload_playlist_if_loaded()
@@ -366,30 +349,21 @@ static void release_playlist_cache_for_playback()
     return;
   }
 
-  // Keep category follow-up state intact; only free memory-heavy vectors.
+  // Keep category follow-up state intact.
   clear_playlist_data();
   playlist_loaded = false;
-
-  Serial.printf("Playlist vectors released for playback. Free heap: %lu, largest block: %lu\n",
-                (unsigned long)heap_caps_get_free_size(MALLOC_CAP_8BIT),
-                (unsigned long)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
 }
 
-static void append_section_entries(JsonArrayConst arr, std::vector<PlaylistEntry> &out)
+static void append_section_entries(JsonArrayConst arr, uint8_t sec)
 {
   for (JsonObjectConst item : arr)
   {
-    const char *text = item["text"] | "";
     const char *file = item["file"] | "";
-    if (file == nullptr || file[0] == '\0')
-    {
-      continue;
-    }
-
-    PlaylistEntry entry;
-    entry.text = text;
-    entry.file = file;
-    out.push_back(entry);
+    if (file == nullptr || file[0] == '\0') continue;
+    if (g_section_count[sec] >= PLAYLIST_MAX_ENTRIES) continue;
+    strncpy(g_section_files[sec][g_section_count[sec]], file, PLAYLIST_MAX_FNAME - 1);
+    g_section_files[sec][g_section_count[sec]][PLAYLIST_MAX_FNAME - 1] = '\0';
+    g_section_count[sec]++;
   }
 }
 
@@ -420,48 +394,28 @@ static bool load_playlist_from_sd()
 
   clear_playlist_data();
 
-  append_section_entries(doc["obrashenija"].as<JsonArrayConst>(), section_obrashenija);
-  append_section_entries(doc["wake_up"].as<JsonArrayConst>(), section_wake_up);
-  append_section_entries(doc["school_reminder"].as<JsonArrayConst>(), section_school_reminder);
-  append_section_entries(doc["fun"].as<JsonArrayConst>(), section_fun);
-  append_section_entries(doc["threat"].as<JsonArrayConst>(), section_threat);
-  append_section_entries(doc["adventure"].as<JsonArrayConst>(), section_adventure);
-  append_section_entries(doc["sleep"].as<JsonArrayConst>(), section_sleep);
-  append_section_entries(doc["evening"].as<JsonArrayConst>(), section_evening);
-  append_section_entries(doc["system"].as<JsonArrayConst>(), section_system);
-
-  pool_morning.insert(pool_morning.end(), section_wake_up.begin(), section_wake_up.end());
-  pool_morning.insert(pool_morning.end(), section_school_reminder.begin(), section_school_reminder.end());
-
-  pool_day.insert(pool_day.end(), section_fun.begin(), section_fun.end());
-  pool_day.insert(pool_day.end(), section_threat.begin(), section_threat.end());
-  pool_day.insert(pool_day.end(), section_adventure.begin(), section_adventure.end());
-
-  pool_night.insert(pool_night.end(), section_sleep.begin(), section_sleep.end());
-  pool_night.insert(pool_night.end(), section_evening.begin(), section_evening.end());
-
-  pool_surprise.insert(pool_surprise.end(), section_obrashenija.begin(), section_obrashenija.end());
-  pool_surprise.insert(pool_surprise.end(), section_wake_up.begin(), section_wake_up.end());
-  pool_surprise.insert(pool_surprise.end(), section_school_reminder.begin(), section_school_reminder.end());
-  pool_surprise.insert(pool_surprise.end(), section_fun.begin(), section_fun.end());
-  pool_surprise.insert(pool_surprise.end(), section_threat.begin(), section_threat.end());
-  pool_surprise.insert(pool_surprise.end(), section_adventure.begin(), section_adventure.end());
-  pool_surprise.insert(pool_surprise.end(), section_sleep.begin(), section_sleep.end());
-  pool_surprise.insert(pool_surprise.end(), section_evening.begin(), section_evening.end());
-  pool_surprise.insert(pool_surprise.end(), section_system.begin(), section_system.end());
+  append_section_entries(doc["obrashenija"].as<JsonArrayConst>(), SEC_OBRASHENIJA);
+  append_section_entries(doc["wake_up"].as<JsonArrayConst>(), SEC_WAKE_UP);
+  append_section_entries(doc["school_reminder"].as<JsonArrayConst>(), SEC_SCHOOL);
+  append_section_entries(doc["fun"].as<JsonArrayConst>(), SEC_FUN);
+  append_section_entries(doc["threat"].as<JsonArrayConst>(), SEC_THREAT);
+  append_section_entries(doc["adventure"].as<JsonArrayConst>(), SEC_ADVENTURE);
+  append_section_entries(doc["sleep"].as<JsonArrayConst>(), SEC_SLEEP);
+  append_section_entries(doc["evening"].as<JsonArrayConst>(), SEC_EVENING);
+  append_section_entries(doc["system"].as<JsonArrayConst>(), SEC_SYSTEM);
 
   playlist_loaded = true;
   Serial.printf(
     "Playlist loaded: obr=%u, wake=%u, school=%u, fun=%u, threat=%u, adv=%u, sleep=%u, evening=%u, system=%u\n",
-    (unsigned)section_obrashenija.size(),
-    (unsigned)section_wake_up.size(),
-    (unsigned)section_school_reminder.size(),
-    (unsigned)section_fun.size(),
-    (unsigned)section_threat.size(),
-    (unsigned)section_adventure.size(),
-    (unsigned)section_sleep.size(),
-    (unsigned)section_evening.size(),
-    (unsigned)section_system.size());
+    (unsigned)g_section_count[SEC_OBRASHENIJA],
+    (unsigned)g_section_count[SEC_WAKE_UP],
+    (unsigned)g_section_count[SEC_SCHOOL],
+    (unsigned)g_section_count[SEC_FUN],
+    (unsigned)g_section_count[SEC_THREAT],
+    (unsigned)g_section_count[SEC_ADVENTURE],
+    (unsigned)g_section_count[SEC_SLEEP],
+    (unsigned)g_section_count[SEC_EVENING],
+    (unsigned)g_section_count[SEC_SYSTEM]);
   return true;
 }
 
@@ -475,98 +429,78 @@ static bool ensure_playlist_loaded()
   return load_playlist_from_sd();
 }
 
-static String build_audio_path(const String &file_name)
+// Returns a pointer into g_section_files — valid until clear_playlist_data() is called.
+static const char* pick_random_file_from_sections(const uint8_t *secs, uint8_t n)
 {
-  if (file_name.length() == 0)
+  uint16_t total = 0;
+  for (uint8_t i = 0; i < n; i++) total += g_section_count[secs[i]];
+  if (total == 0) return nullptr;
+  uint16_t idx = (uint16_t)(random_u32() % total);
+  for (uint8_t i = 0; i < n; i++)
   {
-    return String();
+    uint8_t cnt = g_section_count[secs[i]];
+    if (idx < cnt) return g_section_files[secs[i]][idx];
+    idx -= cnt;
   }
-
-  if (file_name.startsWith("/"))
-  {
-    return file_name;
-  }
-
-  return String(PLAYLIST_AUDIO_BASE) + file_name;
+  return nullptr; // unreachable
 }
 
-static const PlaylistEntry* pick_random_entry(const std::vector<PlaylistEntry> &entries)
-{
-  if (entries.empty())
-  {
-    return nullptr;
-  }
-
-  uint32_t index = random_u32() % entries.size();
-  return &entries[index];
-}
-
-static bool request_sd_file_from_playlist_entry(const PlaylistEntry &entry)
+static bool request_sd_file_by_name(const char *fname)
 {
   if (!ensure_sd_ready())
   {
     return false;
   }
 
-  String full_path = build_audio_path(entry.file);
-  if (full_path.length() == 0)
-  {
-    set_test_status("Empty audio path");
-    return false;
-  }
+  char full_path[32];
+  if (fname[0] == '/')
+    strncpy(full_path, fname, sizeof(full_path) - 1);
+  else
+    snprintf(full_path, sizeof(full_path), "%s%s", PLAYLIST_AUDIO_BASE, fname);
+  full_path[sizeof(full_path) - 1] = '\0';
 
-  if (!SD.exists(full_path.c_str()))
+  if (!SD.exists(full_path))
   {
-    Serial.printf("Missing SD file: %s\n", full_path.c_str());
+    Serial.printf("Missing SD file: %s\n", full_path);
     set_test_status("Audio file missing");
     return false;
   }
 
   release_playlist_cache_for_playback();
   prepare_audio_start();
-  if (!audio.connecttoFS(SD, full_path.c_str()))
+  if (!audio.connecttoFS(SD, full_path))
   {
     audio.setVolume(0);
-    Serial.printf("Failed to play SD file: %s\n", full_path.c_str());
+    Serial.printf("Failed to play SD file: %s\n", full_path);
     set_test_status("SD file failed");
     return false;
   }
   audio.setVolume(AUDIO_LIB_VOLUME);
-
-  Serial.printf("Playing SD file: %s\n", full_path.c_str());
-  if (entry.text.length() > 0)
-  {
-    set_test_status(entry.text.c_str());
-  }
-  else
-  {
-    set_test_status("Playing SD audio");
-  }
-
+  Serial.printf("Playing SD file: %s\n", full_path);
+  set_test_status("Playing SD audio");
   return true;
 }
 
-static bool play_random_from_pool(const std::vector<PlaylistEntry> &pool)
+static bool play_random_from_pool(const uint8_t *pool_secs, uint8_t n)
 {
-  const PlaylistEntry *entry = pick_random_entry(pool);
-  if (entry == nullptr)
+  const char *fname = pick_random_file_from_sections(pool_secs, n);
+  if (fname == nullptr)
   {
     set_test_status("Pool is empty");
     return false;
   }
-
-  return request_sd_file_from_playlist_entry(*entry);
+  return request_sd_file_by_name(fname);
 }
 
-static bool play_mode_pool(const std::vector<PlaylistEntry> &mode_pool)
+static bool play_mode_pool(const uint8_t *pool_secs, uint8_t n)
 {
   if (!ensure_playlist_loaded())
   {
     return false;
   }
 
-  const PlaylistEntry *mode_entry = pick_random_entry(mode_pool);
-  if (mode_entry == nullptr)
+  const char *mode_fname = pick_random_file_from_sections(pool_secs, n);
+  if (mode_fname == nullptr)
   {
     set_test_status("Mode pool is empty");
     return false;
@@ -574,19 +508,23 @@ static bool play_mode_pool(const std::vector<PlaylistEntry> &mode_pool)
 
   if (first_mode_click_needs_obrashenija)
   {
-    const PlaylistEntry *obr_entry = pick_random_entry(section_obrashenija);
-    if (obr_entry != nullptr)
+    const uint8_t obr_sec[] = { SEC_OBRASHENIJA };
+    const char *obr_fname = pick_random_file_from_sections(obr_sec, 1);
+    if (obr_fname != nullptr)
     {
-      String followup = build_audio_path(mode_entry->file);
-      if (followup.length() > 0)
-      {
-        category_followup_path = followup;
-        category_waiting_for_followup = true;
-        category_sequence_active = true;
-      }
+      char followup[32];
+      if (mode_fname[0] == '/')
+        strncpy(followup, mode_fname, sizeof(followup) - 1);
+      else
+        snprintf(followup, sizeof(followup), "%s%s", PLAYLIST_AUDIO_BASE, mode_fname);
+      followup[sizeof(followup) - 1] = '\0';
 
+      category_followup_path = followup;
+      category_waiting_for_followup = true;
+      category_sequence_active = true;
       first_mode_click_needs_obrashenija = false;
-      if (request_sd_file_from_playlist_entry(*obr_entry))
+
+      if (request_sd_file_by_name(obr_fname))
       {
         return true;
       }
@@ -601,7 +539,7 @@ static bool play_mode_pool(const std::vector<PlaylistEntry> &mode_pool)
   category_sequence_active = false;
   category_waiting_for_followup = false;
   category_followup_path = "";
-  return request_sd_file_from_playlist_entry(*mode_entry);
+  return request_sd_file_by_name(mode_fname);
 }
 
 static bool play_random_obrashenija_plus_random_mode()
@@ -611,39 +549,40 @@ static bool play_random_obrashenija_plus_random_mode()
     return false;
   }
 
-  const PlaylistEntry *obr_entry = pick_random_entry(section_obrashenija);
-  if (obr_entry == nullptr)
+  const uint8_t obr_sec[] = { SEC_OBRASHENIJA };
+  const char *obr_fname = pick_random_file_from_sections(obr_sec, 1);
+  if (obr_fname == nullptr)
   {
     set_test_status("obrashenija section empty");
     return false;
   }
 
-  std::vector<const std::vector<PlaylistEntry>*> non_empty_mode_sections;
-  if (!section_wake_up.empty()) non_empty_mode_sections.push_back(&section_wake_up);
-  if (!section_school_reminder.empty()) non_empty_mode_sections.push_back(&section_school_reminder);
-  if (!section_fun.empty()) non_empty_mode_sections.push_back(&section_fun);
-  if (!section_threat.empty()) non_empty_mode_sections.push_back(&section_threat);
-  if (!section_adventure.empty()) non_empty_mode_sections.push_back(&section_adventure);
-  if (!section_sleep.empty()) non_empty_mode_sections.push_back(&section_sleep);
-  if (!section_evening.empty()) non_empty_mode_sections.push_back(&section_evening);
+  // Collect non-empty mode sections into a small stack array.
+  uint8_t non_empty[7];
+  uint8_t non_empty_count = 0;
+  for (uint8_t i = 0; i < sizeof(MODE_SECTIONS); i++)
+  {
+    if (g_section_count[MODE_SECTIONS[i]] > 0)
+      non_empty[non_empty_count++] = MODE_SECTIONS[i];
+  }
 
-  if (non_empty_mode_sections.empty())
+  if (non_empty_count == 0)
   {
     set_test_status("mode sections are empty");
     return false;
   }
 
-  uint32_t section_index = random_u32() % non_empty_mode_sections.size();
-  const std::vector<PlaylistEntry> *chosen_section = non_empty_mode_sections[section_index];
-  const PlaylistEntry *mode_entry = pick_random_entry(*chosen_section);
-  if (mode_entry == nullptr)
-  {
-    set_test_status("mode entry missing");
-    return false;
-  }
+  uint8_t chosen_sec = non_empty[random_u32() % non_empty_count];
+  const char *mode_fname = g_section_files[chosen_sec][random_u32() % g_section_count[chosen_sec]];
 
-  String followup = build_audio_path(mode_entry->file);
-  if (followup.length() == 0)
+  char followup[32];
+  if (mode_fname[0] == '/')
+    strncpy(followup, mode_fname, sizeof(followup) - 1);
+  else
+    snprintf(followup, sizeof(followup), "%s%s", PLAYLIST_AUDIO_BASE, mode_fname);
+  followup[sizeof(followup) - 1] = '\0';
+
+  if (followup[0] == '\0')
   {
     set_test_status("mode path empty");
     return false;
@@ -653,7 +592,7 @@ static bool play_random_obrashenija_plus_random_mode()
   category_waiting_for_followup = true;
   category_sequence_active = true;
 
-  if (request_sd_file_from_playlist_entry(*obr_entry))
+  if (request_sd_file_by_name(obr_fname))
   {
     return true;
   }
@@ -671,13 +610,14 @@ static bool play_startup_system_random()
     return false;
   }
 
-  if (section_system.empty())
+  if (g_section_count[SEC_SYSTEM] == 0)
   {
     set_test_status("system section empty");
     return false;
   }
 
-  return play_random_from_pool(section_system);
+  const uint8_t sys_sec[] = { SEC_SYSTEM };
+  return play_random_from_pool(sys_sec, 1);
 }
 
 static String json_escape(const char *text)
