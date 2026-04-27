@@ -1,6 +1,4 @@
 #include <Arduino.h>
-#include <lvgl.h>
-#include <TFT_eSPI.h>
 #include <WiFi.h>
 #include <WiFiClientSecure.h>
 #include <Preferences.h>
@@ -50,8 +48,6 @@
 #include <SPI.h>
 #include <SD.h>
 #include <FS.h>
-//UI
-#include "ui.h"
 
 char buf[128] = {};
 int bufindex = 0;
@@ -59,24 +55,22 @@ int wifi_close_flag = 0;
 char *info[128] = {};
 int wifi_flag = 0;
 int i = 0;
-int touch_flag = 0;
 
 static Preferences preferences;
 static constexpr uint8_t MIC_ADC_PIN = 25;
 static constexpr uint8_t RECORD_BUTTON_PIN = 32;
 static constexpr uint8_t SPEAKER_PIN = 26;
 static constexpr uint8_t AUDIO_LIB_VOLUME = 21; 
-static constexpr uint16_t TOUCH_THRESHOLD = 600;
 static constexpr uint16_t TTS_BRIDGE_PORT = 8081;
 static constexpr uint32_t TTS_DRAIN_MIN_MS = 1000;
 static constexpr uint32_t TTS_DRAIN_FORCE_MS = 12000;
 static constexpr uint32_t TTS_DRAIN_BUFFER_BYTES = 256;
+static constexpr uint32_t AUDIO_DMA_SETTLE_MS = 5;
 static constexpr uint32_t STARTUP_RAMP_TEST_PLAY_MS = 1800;
 static constexpr uint16_t MANUAL_RAMP_SLOW_STEPS = 512;
 static constexpr uint16_t MANUAL_RAMP_SLOW_HOLD_SAMPLES = 256;
 static constexpr const char *PLAYLIST_JSON_PATH = "/audio/list.json";
 static constexpr const char *PLAYLIST_AUDIO_BASE = "/audio/";
-static lv_obj_t * test_status_label = NULL;
 static bool sd_ready = false;
 static SPIClass sd_spi(HSPI);
 Audio audio(true, I2S_DAC_CHANNEL_LEFT_EN);
@@ -121,57 +115,6 @@ static String category_followup_path;
 #define SD_CS 5
 
 
-/*更改屏幕分辨率*/
-static const uint16_t screenWidth  = 320;
-static const uint16_t screenHeight = 240;
-
-static lv_disp_draw_buf_t draw_buf;
-static lv_color_t buf1[ screenWidth * screenHeight / 8 ];
-
-TFT_eSPI lcd = TFT_eSPI(); /* TFT实例 */
-
-
-
-
-/* 显示器刷新 */
-void my_disp_flush( lv_disp_drv_t *disp, const lv_area_t *area, lv_color_t *color_p )
-{
-  uint32_t w = ( area->x2 - area->x1 + 1 );
-  uint32_t h = ( area->y2 - area->y1 + 1 );
-
-  lcd.startWrite();
-  lcd.setAddrWindow( area->x1, area->y1, w, h );
-  lcd.pushColors( ( uint16_t * )&color_p->full, w * h, true );
-  lcd.endWrite();
-
-  lv_disp_flush_ready( disp );
-}
-
-uint16_t touchX, touchY;
-/*读取触摸板*/
-void my_touchpad_read( lv_indev_drv_t * indev_driver, lv_indev_data_t * data )
-{
-#ifdef TOUCH_CS
-  bool touched = lcd.getTouch( &touchX, &touchY, TOUCH_THRESHOLD);
-  if ( !touched )
-  {
-    data->state = LV_INDEV_STATE_REL;
-  }
-  else
-  {
-    data->state = LV_INDEV_STATE_PR;
-
-    /*设置坐标*/
-    data->point.x = touchX;
-    data->point.y = touchY;
-  }
-#else
-  (void)indev_driver;
-  data->state = LV_INDEV_STATE_REL;
-#endif
-}
-
-
 unsigned char buffer[256]; // buffer array for data recieve over serial port
 int serial_buffer_count = 0;   // counter for buffer array
 void clearBufferArray()              // function to clear buffer array
@@ -186,7 +129,6 @@ char CloseData;
 int NO_Test_Flag = 0;
 int Test_Flag = 0;
 int Close_Flag = 0;
-uint16_t calData[5] = { 557, 3263, 369, 3493, 3  };
 
 
 
@@ -225,13 +167,9 @@ void listDir(fs::FS & fs, const char *dirname, uint8_t levels)
     {
       Serial.print("FILE: ");
       Serial.print(file.name());
-      lcd.setCursor(0, 2 * i);
-      lcd.printf("FILE:%s", file.name());
 
       Serial.print("SIZE: ");
       Serial.println(file.size());
-      lcd.setCursor(180, 2 * i);
-      lcd.printf("SIZE:%d", file.size());
       i += 16;
     }
 
@@ -323,16 +261,34 @@ static bool connect_wifi_from_sources()
 static void set_test_status(const char *text)
 {
   Serial.println(text);
-  if (test_status_label != NULL)
-  {
-    lv_label_set_text(test_status_label, text);
-  }
 }
+
+static bool ensure_sd_ready();
+static void release_playlist_cache_for_playback();
+static void stop_audio_soft_if_active();
 
 static void stop_audio_soft()
 {
-  audio.setVolume(0);
   audio.stopSong();
+  audio.clearDmaBuffer();
+}
+
+static void prepare_audio_start()
+{
+  stop_audio_soft_if_active();
+  audio.setVolume(0);
+  audio.clearDmaBuffer();
+  delay(AUDIO_DMA_SETTLE_MS);
+}
+
+static void stop_audio_soft_if_active()
+{
+  if (!audio.isRunning() && audio.inBufferFilled() == 0)
+  {
+    return;
+  }
+
+  stop_audio_soft();
 }
 
 static uint32_t random_u32()
@@ -567,16 +523,16 @@ static bool request_sd_file_from_playlist_entry(const PlaylistEntry &entry)
   }
 
   release_playlist_cache_for_playback();
-  stop_audio_soft();
+  prepare_audio_start();
   if (!audio.connecttoFS(SD, full_path.c_str()))
   {
-    audio.setVolume(AUDIO_LIB_VOLUME);
+    audio.setVolume(0);
     Serial.printf("Failed to play SD file: %s\n", full_path.c_str());
     set_test_status("SD file failed");
     return false;
   }
-
   audio.setVolume(AUDIO_LIB_VOLUME);
+
   Serial.printf("Playing SD file: %s\n", full_path.c_str());
   if (entry.text.length() > 0)
   {
@@ -1005,7 +961,7 @@ static bool request_elevenlabs_stream_test()
   }
 
   // Free current stream/network resources before opening TTS stream.
-  stop_audio_soft();
+  prepare_audio_start();
   unload_playlist_if_loaded();
   tts_stream_active = false;
   tts_bridge_finished = false;
@@ -1018,12 +974,12 @@ static bool request_elevenlabs_stream_test()
   String local_url = "http://" + WiFi.localIP().toString() + ":" + String(TTS_BRIDGE_PORT) + "/tts";
   if (!audio.connecttohost(local_url.c_str()))
   {
-    audio.setVolume(AUDIO_LIB_VOLUME);
+    audio.setVolume(0);
     set_test_status("TTS bridge connect failed");
     return false;
   }
-
   audio.setVolume(AUDIO_LIB_VOLUME);
+
   set_test_status("Playing TTS stream");
   tts_stream_active = true;
   
@@ -1043,17 +999,17 @@ static bool request_http_stream_test(const char *url, const char *name)
   }
 
   // Always stop current stream before switching to another station.
-  stop_audio_soft();
+  prepare_audio_start();
   unload_playlist_if_loaded();
   if (!audio.connecttohost(url))
   {
-    audio.setVolume(AUDIO_LIB_VOLUME);
+    audio.setVolume(0);
     Serial.printf("%s stream failed\n", name);
     set_test_status("Stream failed");
     return false;
   }
-
   audio.setVolume(AUDIO_LIB_VOLUME);
+
   Serial.printf("Playing %s stream\n", name);
   set_test_status("Playing stream");
   return true;
@@ -1067,16 +1023,16 @@ static bool request_sd_file_test(const char *path)
   }
 
   release_playlist_cache_for_playback();
-  stop_audio_soft();
+  prepare_audio_start();
   if (!audio.connecttoFS(SD, path))
   {
-    audio.setVolume(AUDIO_LIB_VOLUME);
+    audio.setVolume(0);
     Serial.printf("Failed to play SD file: %s\n", path);
     set_test_status("SD file failed");
     return false;
   }
-
   audio.setVolume(AUDIO_LIB_VOLUME);
+
   Serial.printf("Playing SD file: %s\n", path);
   set_test_status("Playing SD audio");
   return true;
@@ -1122,7 +1078,6 @@ static void handle_serial_command(char cmd)
       break;
     case 't':
       Serial.println("Serial cmd t: ramp-up/down test with SD file");
-      stop_audio_soft();
       startup_ramp_test_active = false;
       run_startup_ramp_test();
       break;
@@ -1143,152 +1098,6 @@ static void handle_serial_command(char cmd)
       Serial.println("Use: 0=obrashenija+mode, 1=play radio, 2=play test, 3=elevenlabs test, t=SD ramp test, T=slow DAC ramp");
       break;
   }
-}
-
-static void on_test_button_event(lv_event_t *e)
-{
-  lv_event_code_t code = lv_event_get_code(e);
-  if (code != LV_EVENT_CLICKED && code != LV_EVENT_PRESSED)
-  {
-    return;
-  }
-
-  Serial.println("UI: TTS button clicked");
-  set_test_status("Requesting stream...");
-  request_elevenlabs_stream_test();
-}
-
-static void on_sutrin_button_event(lv_event_t *e)
-{
-  lv_event_code_t code = lv_event_get_code(e);
-  if (code != LV_EVENT_CLICKED && code != LV_EVENT_PRESSED)
-  {
-    return;
-  }
-
-  Serial.println("UI: Сутрин clicked");
-  play_mode_pool(pool_morning);
-}
-
-static void on_den_button_event(lv_event_t *e)
-{
-  lv_event_code_t code = lv_event_get_code(e);
-  if (code != LV_EVENT_CLICKED && code != LV_EVENT_PRESSED)
-  {
-    return;
-  }
-
-  Serial.println("UI: Ден clicked");
-  play_mode_pool(pool_day);
-}
-
-static void on_nosht_button_event(lv_event_t *e)
-{
-  lv_event_code_t code = lv_event_get_code(e);
-  if (code != LV_EVENT_CLICKED && code != LV_EVENT_PRESSED)
-  {
-    return;
-  }
-
-  Serial.println("UI: Нощ clicked");
-  play_mode_pool(pool_night);
-}
-
-static void on_iznenada_button_event(lv_event_t *e)
-{
-  lv_event_code_t code = lv_event_get_code(e);
-  if (code != LV_EVENT_CLICKED && code != LV_EVENT_PRESSED)
-  {
-    return;
-  }
-
-  Serial.println("UI: Изненада clicked");
-  play_random_obrashenija_plus_random_mode();
-}
-
-static void on_ndr_button_event(lv_event_t *e)
-{
-  lv_event_code_t code = lv_event_get_code(e);
-  if (code != LV_EVENT_CLICKED && code != LV_EVENT_PRESSED)
-  {
-    return;
-  }
-
-  Serial.println("UI: NDR button clicked");
-  set_test_status("Requesting NDR stream...");
-  request_http_stream_test(ICECAST_TEST_URL, "NDR");
-}
-
-static void on_nrj_button_event(lv_event_t *e)
-{
-  lv_event_code_t code = lv_event_get_code(e);
-  if (code != LV_EVENT_CLICKED && code != LV_EVENT_PRESSED)
-  {
-    return;
-  }
-
-  Serial.println("UI: NRJ button clicked");
-  set_test_status("Requesting NRJ stream...");
-  request_http_stream_test(NRJ_TEST_URL, "NRJ");
-}
-
-static void on_sd_button_event(lv_event_t *e)
-{
-  lv_event_code_t code = lv_event_get_code(e);
-  if (code != LV_EVENT_CLICKED && code != LV_EVENT_PRESSED)
-  {
-    return;
-  }
-
-  Serial.println("UI: SD button clicked");
-  set_test_status("Requesting SD audio...");
-  request_sd_file_test("/audio/adv_02.mp3");
-}
-
-static void create_test_button()
-{
-  lv_obj_t *screen = lv_scr_act();
-  lv_obj_t *sutrin_button = lv_btn_create(screen);
-  lv_obj_set_size(sutrin_button, 90, 42);
-  lv_obj_align(sutrin_button, LV_ALIGN_BOTTOM_LEFT, 10, -60);
-  lv_obj_add_event_cb(sutrin_button, on_sutrin_button_event, LV_EVENT_ALL, NULL);
-
-  lv_obj_t *sutrin_label = lv_label_create(sutrin_button);
-  lv_label_set_text(sutrin_label, "Сутрин");
-  lv_obj_center(sutrin_label);
-
-  lv_obj_t *den_button = lv_btn_create(screen);
-  lv_obj_set_size(den_button, 90, 42);
-  lv_obj_align(den_button, LV_ALIGN_BOTTOM_LEFT, 110, -60);
-  lv_obj_add_event_cb(den_button, on_den_button_event, LV_EVENT_ALL, NULL);
-
-  lv_obj_t *den_label = lv_label_create(den_button);
-  lv_label_set_text(den_label, "Ден");
-  lv_obj_center(den_label);
-
-  lv_obj_t *nosht_button = lv_btn_create(screen);
-  lv_obj_set_size(nosht_button, 90, 42);
-  lv_obj_align(nosht_button, LV_ALIGN_BOTTOM_LEFT, 210, -60);
-  lv_obj_add_event_cb(nosht_button, on_nosht_button_event, LV_EVENT_ALL, NULL);
-
-  lv_obj_t *nosht_label = lv_label_create(nosht_button);
-  lv_label_set_text(nosht_label, "Нощ");
-  lv_obj_center(nosht_label);
-
-  lv_obj_t *iznenada_button = lv_btn_create(screen);
-  lv_obj_set_size(iznenada_button, 140, 42);
-  lv_obj_align(iznenada_button, LV_ALIGN_BOTTOM_LEFT, 90, -10);
-  lv_obj_add_event_cb(iznenada_button, on_iznenada_button_event, LV_EVENT_ALL, NULL);
-
-  lv_obj_t *iznenada_label = lv_label_create(iznenada_button);
-  lv_label_set_text(iznenada_label, "Изненада");
-  lv_obj_center(iznenada_label);
-
-  test_status_label = lv_label_create(screen);
-  lv_obj_set_width(test_status_label, 300);
-  lv_label_set_long_mode(test_status_label, LV_LABEL_LONG_CLIP);
-  lv_obj_align(test_status_label, LV_ALIGN_BOTTOM_LEFT, 10, -108);
-  lv_label_set_text(test_status_label, "Готово");
 }
 
 void audio_info(const char *info)
@@ -1355,62 +1164,6 @@ void audio_eof_mp3(const char *info)
   }
 }
 
-void touch_calibrate()//屏幕校准
-{
-  uint16_t calData[5];
-  uint8_t calDataOK = 0;
-  Serial.println("屏幕校准");
-
-  //校准
-  //  lcd.fillScreen(TFT_BLACK);
-  //  lcd.setCursor(20, 0);
-  //  Serial.println("setCursor");
-  //  lcd.setTextFont(2);
-  //  Serial.println("setTextFont");
-  //  lcd.setTextSize(1);
-  //  Serial.println("setTextSize");
-  //  lcd.setTextColor(TFT_WHITE, TFT_BLACK);
-
-  //  lcd.println("按指示触摸角落");
-  Serial.println("按指示触摸角落");
-  lv_timer_handler();
-  delay(100);
-  //  lcd.setTextFont(1);
-  //  lcd.println();
-  Serial.println("setTextFont(1)");
-#ifdef TOUCH_CS
-  lcd.calibrateTouch(calData, TFT_MAGENTA, TFT_BLACK, 15);
-  Serial.println("calibrateTouch(calData, TFT_MAGENTA, TFT_BLACK, 15)");
-#else
-  Serial.println("Touch disabled: define TOUCH_CS in TFT_eSPI setup to calibrate touch");
-  return;
-#endif
-  Serial.println(); Serial.println();
-  Serial.println("//在setup()中使用此校准代码:");
-  Serial.print("uint16_t calData[5] = ");
-  Serial.print("{ ");
-
-
-
-  for (uint8_t i = 0; i < 5; i++)
-  {
-    Serial.print(calData[i]);
-    if (i < 4) Serial.print(", ");
-  }
-
-  Serial.println(" };");
-  Serial.print("  tft.setTouch(calData);");
-  Serial.println(); Serial.println();
-  //  lcd.fillScreen(TFT_BLACK);
-  //
-  //  lcd.setTextColor(TFT_GREEN, TFT_BLACK);
-  //  lcd.println("XZ OK!");
-  //  lcd.println("Calibration code sent to Serial port.");
-
-}
-
-
-
 void setup()
 {
   Serial.begin( 115200 ); /*初始化串口*/
@@ -1429,29 +1182,6 @@ void setup()
 
   wifi_flag = connect_wifi_from_sources() ? 1 : 0;
 
-  //lvgl初始化
-  lv_init();
-
-  //LCD初始化
-  lcd.begin();          /*初始化*/
-  lcd.fillScreen(TFT_BLACK);
-  delay(300);
-  //背光引脚
-  pinMode(27, OUTPUT);
-  digitalWrite(27, HIGH);
-  lcd.setRotation(1); /* 旋转 */
-  //  lcd.fillScreen(TFT_RED);
-  //  Serial.println( "111111111" );
-  //  delay(500);
-  //  lcd.fillScreen(TFT_GREEN);
-  //  Serial.println( "222222222" );
-  //  delay(500);
-  //  lcd.fillScreen(TFT_BLUE);
-  //  Serial.println( "33333333" );
-  //  delay(500);
-  //  lcd.fillScreen(TFT_BLACK);
-  //  delay(500);
-
   //SD卡
   //  SPI.begin(SD_SCK, SD_MISO, SD_MOSI);
   //  delay(100);
@@ -1462,37 +1192,6 @@ void setup()
   //  else
   //    Serial.println("SD卡初始化成功");
   //  delay(2000);
-
-  //校准模式。一是四角定位、二是直接输入模拟数值直接定位
-  //屏幕校准
-  //  touch_calibrate();
-#ifdef TOUCH_CS
-  lcd.setTouch( calData );
-#endif
-
-
-  lv_disp_draw_buf_init( &draw_buf, buf1, NULL, screenWidth * screenHeight / 8 );
-
-  /*初始化显示*/
-  static lv_disp_drv_t disp_drv;
-  lv_disp_drv_init( &disp_drv );
-  /*将以下行更改为显示分辨率*/
-  disp_drv.hor_res = screenWidth;
-  disp_drv.ver_res = screenHeight;
-  disp_drv.flush_cb = my_disp_flush;
-  disp_drv.draw_buf = &draw_buf;
-  lv_disp_drv_register( &disp_drv );
-
-  /*初始化（虚拟）输入设备驱动程序*/
-  static lv_indev_drv_t indev_drv;
-  lv_indev_drv_init( &indev_drv );
-  indev_drv.type = LV_INDEV_TYPE_POINTER;
-  indev_drv.read_cb = my_touchpad_read;
-  lv_indev_drv_register( &indev_drv );
-
-  ui_init();//开机UI界面
-  lv_timer_handler();
-  create_test_button();
 
   tts_bridge_server.begin();
   xTaskCreate(
@@ -1550,7 +1249,5 @@ void loop()
       set_test_status("Startup ramp test complete");
     }
   }
-
-  lv_timer_handler();
   //delay(1);
 }
