@@ -1,0 +1,67 @@
+#pragma once
+
+#if __has_include("secrets.h")
+#  include "secrets.h"
+#else
+#  warning "Create include/secrets.h or credentials will be loaded from NVS only"
+#  define WIFI_SSID     ""
+#  define WIFI_PASSWORD ""
+#  define ELEVENLABS_API_KEY ""
+#endif
+
+#ifndef ELEVENLABS_API_KEY
+#define ELEVENLABS_API_KEY ""
+#endif
+
+#ifndef ELEVENLABS_VOICE_ID
+#define ELEVENLABS_VOICE_ID "JBFqnCBsd6RMkjVDRZzb"
+#endif
+
+#ifndef ELEVENLABS_MODEL_ID
+#define ELEVENLABS_MODEL_ID "eleven_multilingual_v2"
+#endif
+
+#ifndef ELEVENLABS_TEST_TEXT
+#define ELEVENLABS_TEST_TEXT "Здравей, Бернар. Аз съм Маги. А тези мъничета защо спят?"
+#endif
+
+#ifndef ELEVENLABS_OUTPUT_FORMAT
+#define ELEVENLABS_OUTPUT_FORMAT "mp3_22050_32"
+#endif
+
+#ifndef ICECAST_TEST_URL
+#define ICECAST_TEST_URL "http://icecast.ndr.de/ndr/ndr1wellenord/kiel/mp3/128/stream.mp3"
+#endif
+
+#ifndef NRJ_TEST_URL
+#define NRJ_TEST_URL "http://play.global.audio/nrj64"
+#endif
+
+// Hardware pins
+#define PIN_MIC_ADC          25
+#define PIN_RECORD_BUTTON    32
+#define PIN_SPEAKER          26
+#define PIN_SD_MOSI          23
+#define PIN_SD_MISO          19
+#define PIN_SD_SCK           18
+#define PIN_SD_CS            5
+#define PIN_BACKLIGHT        27
+
+// Audio
+#define AUDIO_LIB_VOLUME     21
+
+// TTS bridge
+#define TTS_BRIDGE_PORT      8081
+#define TTS_DRAIN_MIN_MS     1000
+#define TTS_DRAIN_FORCE_MS   12000
+#define TTS_DRAIN_BUFFER_BYTES 256
+
+// Audio DMA settle delay before playback starts
+#define AUDIO_DMA_SETTLE_MS  5
+
+// Playlist
+#define PLAYLIST_JSON_PATH   "/audio/list.json"
+#define PLAYLIST_AUDIO_BASE  "/audio/"
+#define PLAYLIST_NUM_SECTIONS 9
+#define PLAYLIST_MAX_ENTRIES  20
+#define PLAYLIST_MAX_FNAME    16
