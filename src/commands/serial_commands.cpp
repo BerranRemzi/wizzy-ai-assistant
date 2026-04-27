@@ -34,7 +34,7 @@ void serial_commands_handle(char cmd)
             break;
         case 's':
             Serial.println("Serial cmd s: stop audio");
-            audio_engine_stop_soft();
+            audio_engine_stop();
             set_status("Audio stopped");
             break;
         case '\r':

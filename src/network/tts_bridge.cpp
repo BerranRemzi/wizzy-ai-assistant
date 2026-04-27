@@ -195,7 +195,7 @@ void tts_bridge_check_finished()
         if ((elapsed >= TTS_DRAIN_MIN_MS && buffered <= TTS_DRAIN_BUFFER_BYTES) ||
             (elapsed >= TTS_DRAIN_FORCE_MS))
         {
-            audio_engine_stop_soft();
+            audio_engine_stop();
             playback_set_tts_active(false);
             s_tts_bridge_finished = false;
             s_tts_bridge_finished_at_ms = 0;
