@@ -30,6 +30,8 @@ static lv_color_t buf1[ screenWidth * screenHeight / 8 ];
 static TFT_eSPI lcd = TFT_eSPI();
 static lv_obj_t *test_status_label = NULL;
 static uint16_t touch_cal_data[5] = { 557, 3263, 369, 3493, 3 };
+static bool play_button_was_pressed = false;
+static uint32_t play_button_changed_at_ms = 0;
 
 void my_disp_flush(lv_disp_drv_t *disp, const lv_area_t *area, lv_color_t *color_p)
 {
@@ -105,13 +107,32 @@ static void create_ui()
     lv_label_set_text(test_status_label, "Готово");
 }
 
+static void handle_play_button()
+{
+    const bool pressed = digitalRead(PIN_PLAY_BUTTON) == LOW;
+    const uint32_t now = millis();
+
+    if (pressed != play_button_was_pressed && (now - play_button_changed_at_ms) >= 40)
+    {
+        play_button_changed_at_ms = now;
+        play_button_was_pressed = pressed;
+
+        if (pressed)
+        {
+            Serial.println("Button: play random obrashenija + mode");
+            playback_play_obrashenija_plus_mode();
+        }
+    }
+}
+
 void setup()
 {
     Serial.begin(115200);
     Serial2.begin(115200);
 
     if (PIN_MIC_ADC != PIN_SPEAKER) pinMode(PIN_MIC_ADC, INPUT);
-    pinMode(PIN_RECORD_BUTTON, INPUT_PULLUP);
+    pinMode(PIN_PLAY_BUTTON, INPUT_PULLUP);
+    play_button_was_pressed = digitalRead(PIN_PLAY_BUTTON) == LOW;
 
     audio.setVolume(AUDIO_LIB_VOLUME);
     wifi_manager_connect_from_sources();
@@ -164,6 +185,7 @@ void loop()
 
     audio.loop();
     tts_bridge_check_finished();
+    handle_play_button();
 
     lv_timer_handler();
 }
