@@ -4,6 +4,7 @@
 #include <TFT_eSPI.h>
 #include <WiFi.h>
 #include <Preferences.h>
+#include <time.h>
 #include <Audio.h>
 #include <Wire.h>
 #include <SPI.h>
@@ -121,28 +122,28 @@ static void create_ui()
         return btn;
     };
 
-    make_btn("Сутрин", on_sutrin, 10, -60);
-    make_btn("Ден", on_den, 110, -60);
-    make_btn("Нощ", on_nosht, 210, -60);
-    make_btn("Изненада", on_iznenada, 90, -10, 140);
+    /* Ensure the screen is clean and show only clock + IP */
+    lv_obj_clean(screen);
 
-    test_status_label = lv_label_create(screen);
-    lv_obj_set_width(test_status_label, 300);
-    lv_label_set_long_mode(test_status_label, LV_LABEL_LONG_CLIP);
-    lv_obj_align(test_status_label, LV_ALIGN_BOTTOM_LEFT, 10, -108);
-    lv_label_set_text(test_status_label, "Готово");
-
-    /* Large centered clock */
+    /* Large centered clock that fills the screen width */
     ui_clock_label = lv_label_create(screen);
     lv_label_set_text(ui_clock_label, "00:00");
+    lv_obj_set_width(ui_clock_label, screenWidth);
     lv_obj_set_style_text_font(ui_clock_label, &lv_font_montserrat_48, 0);
+    lv_obj_set_style_text_color(ui_clock_label, lv_color_hex(0x000000), 0);
+    lv_obj_set_style_text_align(ui_clock_label, LV_TEXT_ALIGN_CENTER, 0);
+    lv_label_set_long_mode(ui_clock_label, LV_LABEL_LONG_WRAP);
     lv_obj_align(ui_clock_label, LV_ALIGN_CENTER, 0, -8);
 
     /* Small IP address at bottom center */
     ui_ip_label = lv_label_create(screen);
     lv_label_set_text(ui_ip_label, "IP: --.--.--.--");
     lv_obj_set_style_text_font(ui_ip_label, &lv_font_montserrat_14, 0);
-    lv_obj_align(ui_ip_label, LV_ALIGN_BOTTOM_MID, 0, -8);
+    lv_obj_set_style_text_color(ui_ip_label, lv_color_hex(0x000000), 0);
+    lv_obj_set_width(ui_ip_label, screenWidth);
+    lv_obj_set_style_text_align(ui_ip_label, LV_TEXT_ALIGN_CENTER, 0);
+    lv_label_set_long_mode(ui_ip_label, LV_LABEL_LONG_CLIP);
+    lv_obj_align(ui_ip_label, LV_ALIGN_BOTTOM_MID, 0, -6);
 }
 
 static void update_clock_and_ip()
@@ -150,20 +151,27 @@ static void update_clock_and_ip()
     static char ip_buf[32];
     static char time_buf[6];
     static uint32_t last_ip_update = 0;
-    uint32_t now = millis();
+    static int last_min = -1;
 
-    // Update time every second
-    static uint32_t last_sec = 0;
-    uint32_t sec = now / 1000 % 60;
-    if (sec != last_sec)
+    // Use NTP/local time when available (Sofia timezone configured in setup)
+    time_t nowt = time(nullptr);
+    if (nowt > 100000)
     {
-        last_sec = sec;
-        uint32_t total_min = now / 1000 / 60;
-        uint32_t h = total_min / 60;
-        uint32_t m = total_min % 60;
-        snprintf(time_buf, sizeof(time_buf), "%02lu:%02lu", h, m);
-        lv_label_set_text(ui_clock_label, time_buf);
+        struct tm timeinfo;
+        localtime_r(&nowt, &timeinfo);
+        if (timeinfo.tm_min != last_min)
+        {
+            last_min = timeinfo.tm_min;
+            snprintf(time_buf, sizeof(time_buf), "%02d:%02d", timeinfo.tm_hour, timeinfo.tm_min);
+            lv_label_set_text(ui_clock_label, time_buf);
+        }
     }
+    else
+    {
+        lv_label_set_text(ui_clock_label, "--:--");
+    }
+
+    uint32_t now = millis();
 
     // Update IP every 10 seconds or if empty
     if (now - last_ip_update > 10000 || strlen(ip_buf) == 0)
@@ -192,7 +200,25 @@ void setup()
     play_button_was_pressed = digitalRead(PIN_PLAY_BUTTON) == LOW;
 
     audio.setVolume(AUDIO_LIB_VOLUME);
-    wifi_manager_connect_from_sources();
+    bool wifi_ok = wifi_manager_connect_from_sources();
+    if (wifi_ok)
+    {
+        configTzTime("EET-2EEST-3,M3.5.0/3,M10.5.0/4", "pool.ntp.org", "time.google.com");
+        Serial.println("Waiting for NTP time sync...");
+        struct tm timeinfo;
+        if (getLocalTime(&timeinfo, 5000))
+        {
+            Serial.printf("NTP time synced: %04d-%02d-%02d %02d:%02d:%02d\n", timeinfo.tm_year+1900, timeinfo.tm_mon+1, timeinfo.tm_mday, timeinfo.tm_hour, timeinfo.tm_min, timeinfo.tm_sec);
+        }
+        else
+        {
+            Serial.println("Failed to sync time");
+        }
+    }
+    else
+    {
+        Serial.println("Skipping NTP (WiFi not connected)");
+    }
 
     lv_init();
 
@@ -237,7 +263,7 @@ void setup()
     Serial.println("Starting lcd.begin()...");
     lcd.begin();
     Serial.println("lcd.begin() returned");
-    lcd.fillScreen(TFT_BLACK);
+    lcd.fillScreen(TFT_WHITE);
     delay(300);
     pinMode(PIN_BACKLIGHT, OUTPUT);
     // Backlight diagnostics: try toggle to verify BL pin and polarity

@@ -48,7 +48,6 @@ LV_IMG_DECLARE(ui_img_1086482287);    // assets\007-icon_retuen_1.png
 LV_IMG_DECLARE(ui_img_410158353);    // assets\007-icon_retuen_(2).png
 
 
-
 void ui_init(void);
 
 #ifdef __cplusplus
