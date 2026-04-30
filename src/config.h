@@ -41,6 +41,7 @@
 #define PIN_MIC_ADC          25
 #define PIN_PLAY_BUTTON      21
 #define PIN_SPEAKER          26
+// SD on VSPI (keep SD on separate SPI bus from TFT)
 #define PIN_SD_MOSI          23
 #define PIN_SD_MISO          19
 #define PIN_SD_SCK           18

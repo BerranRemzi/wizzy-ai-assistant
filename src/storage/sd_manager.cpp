@@ -1,7 +1,7 @@
 #include "sd_manager.h"
 
 static bool g_sd_ready = false;
-static SPIClass g_sd_spi(HSPI);
+static SPIClass g_sd_spi(VSPI);
 
 static void list_dir(fs::FS &fs, const char *dirname, uint8_t levels)
 {
