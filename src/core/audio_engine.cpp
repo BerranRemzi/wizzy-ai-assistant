@@ -6,7 +6,7 @@ Audio audio(true, I2S_DAC_CHANNEL_LEFT_EN);
 void audio_engine_stop()
 {
     audio.stopSong();
-    audio.freeDecoderMemory();
+    // Keep decoder buffers allocated to avoid heap-fragmentation-driven realloc failures.
     audio.clearDmaBuffer();
 }
 

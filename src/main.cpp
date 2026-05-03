@@ -8,6 +8,7 @@
 #include <Wire.h>
 #include <SPI.h>
 #include <SD.h>
+#include <esp_heap_caps.h>
 #include <libs/tiny_ttf/lv_tiny_ttf.h>
 
 #include "config.h"
@@ -280,15 +281,27 @@ void setup()
     lv_indev_set_type(indev, LV_INDEV_TYPE_POINTER);
     lv_indev_set_read_cb(indev, my_touchpad_read);
 
+    // Start audio early so decoder buffers reserve memory before heavy UI/font allocations.
+    set_status("Audio test ready");
+    playback_play_startup_system();
+
+    Serial.printf("Heap before TinyTTF/UI: free=%u min=%u largest=%u\n",
+                  ESP.getFreeHeap(),
+                  ESP.getMinFreeHeap(),
+                  heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
+
     load_clock_ttf_font();
     lv_timer_handler();
     create_ui();
 
+    Serial.printf("Heap after TinyTTF/UI: free=%u min=%u largest=%u\n",
+                  ESP.getFreeHeap(),
+                  ESP.getMinFreeHeap(),
+                  heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
+
     tts_bridge_server_begin();
     // TTS bridge task is started in tts_bridge.cpp
 
-    set_status("Audio test ready");
-    playback_play_startup_system();
     Serial.println("Serial commands: 0=obrashenija+mode, 1=play radio, 2=play test, 3=elevenlabs test, s=stop audio");
     Serial.println("Setup done");
 }
@@ -301,9 +314,25 @@ void loop()
     }
 
     audio.loop();
-    tts_bridge_check_finished();
-    handle_play_button();
-    update_clock_and_ip();
 
-    lv_timer_handler();
+    tts_bridge_check_finished();
+
+    static uint32_t last_inputs_and_status_ms = 0;
+    static uint32_t last_lvgl_ms = 0;
+    const uint32_t now = millis();
+
+    if ((now - last_inputs_and_status_ms) >= 20)
+    {
+        last_inputs_and_status_ms = now;
+        handle_play_button();
+        update_clock_and_ip();
+    }
+
+    if ((now - last_lvgl_ms) >= 100)
+    {
+        last_lvgl_ms = now;
+        lv_timer_handler();
+    }
+
+    //yield();
 }

@@ -10,8 +10,8 @@ extern bool playback_handle_followup_stream();
 
 void audio_info(const char *info)
 {
-    Serial.print("audio_info: ");
-    Serial.println(info);
+    // Keep this quiet in normal runs; frequent logs can affect streaming smoothness.
+    (void)info;
 }
 
 void audio_showstreamtitle(const char *info)
