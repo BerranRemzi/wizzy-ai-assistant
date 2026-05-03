@@ -2,9 +2,7 @@
 """Pre-build copy script for PlatformIO.
 
 Copies `User_Setup.h` and `lv_conf.h` into the active environment's
-.pio/libdeps/<env>/ folder and merges LVGL `demos` and `example` into
-.pio/libdeps/<env>/lvgl/src so the library source tree includes demo/example
-files when building.
+.pio/libdeps/<env>/ folder.
 
 This script is idempotent and prints informative messages for missing
 sources so it's safe to run during PlatformIO builds.
@@ -16,7 +14,6 @@ import sys
 # Minimal output by default. Set PRE_BUILD_VERBOSE=1 to enable detailed logs.
 VERBOSE = os.environ.get("PRE_BUILD_VERBOSE", "0") == "1"
 copied_files = 0
-merged_files = 0
 
 def find_user_setup(project_root):
     candidates = [
@@ -39,27 +36,19 @@ def copy_file(src, dst):
         print(f"Copied: {src} -> {dst}")
 
 
-def merge_dirs(src, dst):
-    if not os.path.isdir(src):
-        if VERBOSE:
-            print(f"Source directory not found, skipping: {src}")
-        return
-    for root, _, files in os.walk(src):
-        rel = os.path.relpath(root, src)
-        target_root = os.path.join(dst, rel) if rel != os.curdir else dst
-        os.makedirs(target_root, exist_ok=True)
-        for f in files:
-            s = os.path.join(root, f)
-            d = os.path.join(target_root, f)
-            shutil.copy2(s, d)
-            global merged_files
-            merged_files += 1
-            if VERBOSE:
-                print(f"Copied: {s} -> {d}")
+def neutralize_asm_file(path):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, 'w', encoding='ascii') as f:
+        f.write("/* Stubbed for Xtensa build */\n")
+    if VERBOSE:
+        print(f"Neutralized incompatible source: {path}")
 
 
 def main():
-    project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+    project_root = os.environ.get('PLATFORMIO_PROJECT_DIR')
+    if not project_root:
+        project_root = os.getcwd()
+    project_root = os.path.abspath(project_root)
     env = os.environ.get('PLATFORMIO_ENV') or os.environ.get('PIOENV') or 'ai-assistant'
     target_base = os.path.join(project_root, '.pio', 'libdeps', env)
 
@@ -72,38 +61,28 @@ def main():
     else:
         print('Warning: User_Setup.h not found in include/, src/, or tools/libraries/')
 
-    # Copy lv_conf.h
-    lv_conf_src = os.path.join(project_root, 'tools', 'libraries', 'lv_conf.h')
+    # Copy lv_conf.h (single source of truth: include/lv_conf.h)
+    lv_conf_src = os.path.join(project_root, 'include', 'lv_conf.h')
+    if not os.path.isfile(lv_conf_src):
+        # Backward-compatible fallback
+        lv_conf_src = os.path.join(project_root, 'tools', 'libraries', 'lv_conf.h')
     if os.path.isfile(lv_conf_src):
         copy_file(lv_conf_src, os.path.join(target_base, 'lv_conf.h'))
     else:
-        print(f"Warning: {lv_conf_src} not found; skipping lv_conf.h copy")
+        print("Warning: lv_conf.h not found in include/ or tools/libraries/; skipping lv_conf.h copy")
 
-    # Merge lvgl demos/example into lvgl/src
+    # Neutralize ARM-only assembly sources that PlatformIO still tries to compile on Xtensa.
     lvgl_base = os.path.join(target_base, 'lvgl')
-    dest_src = os.path.join(lvgl_base, 'src')
-    merge_dirs(os.path.join(lvgl_base, 'demos'), dest_src)
-    merge_dirs(os.path.join(lvgl_base, 'example'), dest_src)
-
-    # Copy project UI sources (so ui_init is compiled)
-    ui_tools_dir = os.path.join(project_root, 'tools', 'libraries', 'UI')
-    if os.path.isdir(ui_tools_dir):
-        dest_ui = os.path.join(project_root, 'src', 'UI')
-        if VERBOSE:
-            print(f"Copying UI sources: {ui_tools_dir} -> {dest_ui}")
-        merge_dirs(ui_tools_dir, dest_ui)
-    else:
-        if VERBOSE:
-            print(f"Notice: UI folder not found in tools/libraries/UI; skipping UI copy")
+    neutralize_asm_file(os.path.join(lvgl_base, 'src', 'draw', 'sw', 'blend', 'helium', 'lv_blend_helium.S'))
+    neutralize_asm_file(os.path.join(lvgl_base, 'src', 'draw', 'sw', 'blend', 'neon', 'lv_blend_neon.S'))
 
     # Summary (only printed when verbose)
     if VERBOSE:
-        print(f"Pre-build summary: copied {copied_files} files, merged {merged_files} files")
+        print(f"Pre-build summary: copied {copied_files} files")
 
 
-if __name__ == '__main__':
-    try:
-        main()
-    except Exception as e:
-        print(f"Pre-build copy script failed: {e}")
-        sys.exit(1)
+try:
+    main()
+except Exception as e:
+    print(f"Pre-build copy script failed: {e}")
+    sys.exit(1)

@@ -19,6 +19,14 @@
 #include <esp_heap_caps.h>
 #include <stdint.h>
 
+/* LVGL 9 memory backend: use C library malloc/free instead of builtin 64KB pool */
+#define LV_USE_STDLIB_MALLOC  LV_STDLIB_CLIB
+#define LV_USE_STDLIB_STRING  LV_STDLIB_CLIB
+#define LV_USE_STDLIB_SPRINTF LV_STDLIB_CLIB
+
+/* Xtensa target: never use ARM asm draw backends */
+#define LV_USE_DRAW_SW_ASM LV_DRAW_SW_ASM_NONE
+
 /*====================
    COLOR SETTINGS
  *====================*/
@@ -666,6 +674,13 @@
         #define LV_FREETYPE_CACHE_FT_FACES 0
         #define LV_FREETYPE_CACHE_FT_SIZES 0
     #endif
+#endif
+
+/*Tiny TrueType font parser*/
+#define LV_USE_TINY_TTF 1
+#if LV_USE_TINY_TTF
+    /* We'll load TTF bytes with Arduino SD and create font from memory data. */
+    #define LV_TINY_TTF_FILE_SUPPORT 0
 #endif
 
 /*Rlottie library*/

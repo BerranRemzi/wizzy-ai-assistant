@@ -3,36 +3,30 @@
 #include <lvgl.h>
 #include <TFT_eSPI.h>
 #include <WiFi.h>
-#include <Preferences.h>
 #include <time.h>
 #include <Audio.h>
 #include <Wire.h>
 #include <SPI.h>
 #include <SD.h>
-#include <FS.h>
+#include <libs/tiny_ttf/lv_tiny_ttf.h>
 
 #include "config.h"
 #include "core/audio_engine.h"
-#include "core/callbacks.h"
 #include "network/wifi_manager.h"
 #include "network/tts_bridge.h"
-#include "storage/sd_manager.h"
-#include "playlist/playlist.h"
 #include "playlist/playback.h"
 #include "commands/serial_commands.h"
-
-// UI
-#include "ui.h"
+#include "fonts/ubuntu_font.h"
 
 // Forward declarations
 static void create_ui();
 static void update_clock_and_ip();
 static void handle_play_button();
+static bool load_clock_ttf_font();
 
 // Display
 static const uint16_t screenWidth  = 320;
 static const uint16_t screenHeight = 240;
-static lv_disp_draw_buf_t draw_buf;
 static lv_color_t buf1[ screenWidth * screenHeight / 8 ];
 static TFT_eSPI lcd = TFT_eSPI();
 static lv_obj_t *test_status_label = NULL;
@@ -41,19 +35,39 @@ static lv_obj_t *ui_clock_label = NULL;
 static lv_obj_t *ui_ip_label = NULL;
 static bool play_button_was_pressed = false;
 static uint32_t play_button_changed_at_ms = 0;
+static const int32_t CLOCK_TTF_SIZE = 100;
+static lv_font_t *clock_ttf_font = NULL;
 
-void my_disp_flush(lv_disp_drv_t *disp, const lv_area_t *area, lv_color_t *color_p)
+static uint32_t lv_tick_get_cb(void)
+{
+    return millis();
+}
+
+static bool load_clock_ttf_font()
+{
+    clock_ttf_font = lv_tiny_ttf_create_data(ubuntu_font, (size_t)ubuntu_font_size, CLOCK_TTF_SIZE);
+    if (clock_ttf_font == NULL)
+    {
+        Serial.println("Clock TTF: lv_tiny_ttf_create_data failed");
+        return false;
+    }
+
+    Serial.printf("Clock TTF: embedded ubuntu_font loaded (%u bytes) at size %d\n", (unsigned)ubuntu_font_size, (int)CLOCK_TTF_SIZE);
+    return true;
+}
+
+void my_disp_flush(lv_display_t *disp, const lv_area_t *area, uint8_t *px_map)
 {
     uint32_t w = (area->x2 - area->x1 + 1);
     uint32_t h = (area->y2 - area->y1 + 1);
     lcd.startWrite();
     lcd.setAddrWindow(area->x1, area->y1, w, h);
-    lcd.pushColors((uint16_t *)&color_p->full, w * h, true);
+    lcd.pushColors((uint16_t *)px_map, w * h, true);
     lcd.endWrite();
-    lv_disp_flush_ready(disp);
+    lv_display_flush_ready(disp);
 }
 
-void my_touchpad_read(lv_indev_drv_t *indev_driver, lv_indev_data_t *data)
+void my_touchpad_read(lv_indev_t *indev_driver, lv_indev_data_t *data)
 {
 #ifdef TOUCH_CS
     uint16_t touchX, touchY;
@@ -90,46 +104,20 @@ static void handle_play_button()
     }
 }
 
-static void on_button_event(lv_event_t *e, const char *label, void (*action)())
-{
-    lv_event_code_t code = lv_event_get_code(e);
-    if (code != LV_EVENT_CLICKED && code != LV_EVENT_PRESSED) return;
-    Serial.printf("UI: %s clicked\n", label);
-    action();
-}
-
-static void on_sutrin(lv_event_t *e) { on_button_event(e, "Сутрин", [](){ playback_play_mode_pool(POOL_MORNING, POOL_MORNING_LEN); }); }
-static void on_den(lv_event_t *e)    { on_button_event(e, "Ден",    [](){ playback_play_mode_pool(POOL_DAY, POOL_DAY_LEN); }); }
-static void on_nosht(lv_event_t *e)  { on_button_event(e, "Нощ",    [](){ playback_play_mode_pool(POOL_NIGHT, POOL_NIGHT_LEN); }); }
-static void on_iznenada(lv_event_t *e) { on_button_event(e, "Изненада", [](){ playback_play_obrashenija_plus_mode(); }); }
-static void on_ndr(lv_event_t *e)    { on_button_event(e, "NDR",    [](){ playback_request_http_stream(ICECAST_TEST_URL, "NDR"); }); }
-static void on_nrj(lv_event_t *e)    { on_button_event(e, "NRJ",    [](){ playback_request_http_stream(NRJ_TEST_URL, "NRJ"); }); }
-static void on_sd(lv_event_t *e)     { on_button_event(e, "SD",     [](){ playback_request_sd_file_by_path("/audio/adv_02.mp3"); }); }
-static void on_tts(lv_event_t *e)    { on_button_event(e, "TTS",    [](){ playback_request_tts_stream(); }); }
-
 static void create_ui()
 {
     lv_obj_t *screen = lv_scr_act();
 
-    auto make_btn = [&](const char *text, lv_event_cb_t cb, int x, int y, int w = 90, int h = 42) {
-        lv_obj_t *btn = lv_btn_create(screen);
-        lv_obj_set_size(btn, w, h);
-        lv_obj_align(btn, LV_ALIGN_BOTTOM_LEFT, x, y);
-        lv_obj_add_event_cb(btn, cb, LV_EVENT_ALL, NULL);
-        lv_obj_t *lbl = lv_label_create(btn);
-        lv_label_set_text(lbl, text);
-        lv_obj_center(lbl);
-        return btn;
-    };
-
     /* Ensure the screen is clean and show only clock + IP */
     lv_obj_clean(screen);
+    lv_obj_set_style_bg_color(screen, lv_color_hex(0xFFFFFF), LV_PART_MAIN | LV_STATE_DEFAULT);
+    lv_obj_set_style_bg_opa(screen, LV_OPA_COVER, LV_PART_MAIN | LV_STATE_DEFAULT);
 
     /* Large centered clock that fills the screen width */
     ui_clock_label = lv_label_create(screen);
     lv_label_set_text(ui_clock_label, "00:00");
     lv_obj_set_width(ui_clock_label, screenWidth);
-    lv_obj_set_style_text_font(ui_clock_label, &lv_font_montserrat_48, 0);
+    lv_obj_set_style_text_font(ui_clock_label, clock_ttf_font ? clock_ttf_font : &lv_font_montserrat_48, 0);
     lv_obj_set_style_text_color(ui_clock_label, lv_color_hex(0x000000), 0);
     lv_obj_set_style_text_align(ui_clock_label, LV_TEXT_ALIGN_CENTER, 0);
     lv_label_set_long_mode(ui_clock_label, LV_LABEL_LONG_WRAP);
@@ -221,6 +209,7 @@ void setup()
     }
 
     lv_init();
+    lv_tick_set_cb(lv_tick_get_cb);
 
     // Diagnostic info: TFT pin macros (from include/User_Setup.h)
 #ifdef TFT_CS
@@ -282,22 +271,16 @@ void setup()
     lcd.setTouch(touch_cal_data);
 #endif
 
-    lv_disp_draw_buf_init(&draw_buf, buf1, NULL, screenWidth * screenHeight / 8);
-    static lv_disp_drv_t disp_drv;
-    lv_disp_drv_init(&disp_drv);
-    disp_drv.hor_res = screenWidth;
-    disp_drv.ver_res = screenHeight;
-    disp_drv.flush_cb = my_disp_flush;
-    disp_drv.draw_buf = &draw_buf;
-    lv_disp_drv_register(&disp_drv);
+    lv_display_t *disp = lv_display_create(screenWidth, screenHeight);
+    lv_display_set_color_format(disp, LV_COLOR_FORMAT_RGB565);
+    lv_display_set_flush_cb(disp, my_disp_flush);
+    lv_display_set_buffers(disp, buf1, NULL, sizeof(buf1), LV_DISPLAY_RENDER_MODE_PARTIAL);
 
-    static lv_indev_drv_t indev_drv;
-    lv_indev_drv_init(&indev_drv);
-    indev_drv.type = LV_INDEV_TYPE_POINTER;
-    indev_drv.read_cb = my_touchpad_read;
-    lv_indev_drv_register(&indev_drv);
+    lv_indev_t *indev = lv_indev_create();
+    lv_indev_set_type(indev, LV_INDEV_TYPE_POINTER);
+    lv_indev_set_read_cb(indev, my_touchpad_read);
 
-    ui_init();
+    load_clock_ttf_font();
     lv_timer_handler();
     create_ui();
 
