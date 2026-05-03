@@ -26,6 +26,8 @@ const size_t MODE_SECTIONS_LEN = sizeof(MODE_SECTIONS) / sizeof(MODE_SECTIONS[0]
 
 static bool g_playlist_loaded = false;
 
+extern void ui_release_heavy_assets_for_audio();
+
 static void append_section_entries(JsonArrayConst arr, uint8_t sec)
 {
     for (JsonObjectConst item : arr)
@@ -85,6 +87,11 @@ static bool load_from_sd()
 bool playlist_ensure_loaded()
 {
     if (g_playlist_loaded) return true;
+
+    if (load_from_sd()) return true;
+
+    // If JSON parsing fails due low heap, release heavy UI assets and retry once.
+    ui_release_heavy_assets_for_audio();
     return load_from_sd();
 }
 
@@ -105,9 +112,8 @@ void playlist_unload_if_loaded()
 
 void playlist_release_for_playback()
 {
-    if (!g_playlist_loaded) return;
-    playlist_clear_data();
-    g_playlist_loaded = false;
+    // Keep parsed playlist cached. Clearing it here forces reparsing during playback,
+    // which can fail with NoMemory under runtime heap pressure.
 }
 
 const char* playlist_pick_random_from_sections(const uint8_t *secs, uint8_t n)

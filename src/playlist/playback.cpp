@@ -10,6 +10,8 @@
 #include <FS.h>
 #include <WiFi.h>
 
+extern void ui_release_heavy_assets_for_audio();
+
 bool playback_sequence_active = false;
 bool playback_waiting_for_followup = false;
 static String s_followup_path;
@@ -45,10 +47,17 @@ bool playback_request_sd_file(const char *fname)
     audio_engine_prepare_start();
     if (!audio.connecttoFS(SD, full_path))
     {
-        audio.setVolume(0);
-        Serial.printf("Failed to play SD file: %s\n", full_path);
-        set_status("SD file failed");
-        return false;
+        Serial.printf("First SD play attempt failed, trying memory recovery: %s\n", full_path);
+        ui_release_heavy_assets_for_audio();
+        audio_engine_prepare_start();
+
+        if (!audio.connecttoFS(SD, full_path))
+        {
+            audio.setVolume(0);
+            Serial.printf("Failed to play SD file: %s\n", full_path);
+            set_status("SD file failed");
+            return false;
+        }
     }
     audio.setVolume(AUDIO_LIB_VOLUME);
     Serial.printf("Playing SD file: %s\n", full_path);
@@ -63,10 +72,17 @@ bool playback_request_sd_file_by_path(const char *path)
     audio_engine_prepare_start();
     if (!audio.connecttoFS(SD, path))
     {
-        audio.setVolume(0);
-        Serial.printf("Failed to play SD file: %s\n", path);
-        set_status("SD file failed");
-        return false;
+        Serial.printf("First SD play attempt failed, trying memory recovery: %s\n", path);
+        ui_release_heavy_assets_for_audio();
+        audio_engine_prepare_start();
+
+        if (!audio.connecttoFS(SD, path))
+        {
+            audio.setVolume(0);
+            Serial.printf("Failed to play SD file: %s\n", path);
+            set_status("SD file failed");
+            return false;
+        }
     }
     audio.setVolume(AUDIO_LIB_VOLUME);
     Serial.printf("Playing SD file: %s\n", path);
