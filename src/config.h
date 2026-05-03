@@ -60,6 +60,10 @@
 // Audio DMA settle delay before playback starts
 #define AUDIO_DMA_SETTLE_MS  5
 
+// UI memory guard: when audio is running and free heap is below this threshold,
+// screen updates are temporarily paused to prioritize audio stability.
+#define UI_UPDATE_MIN_FREE_HEAP_BYTES 35000
+
 // Playlist
 #define PLAYLIST_JSON_PATH   "/audio/list.json"
 #define PLAYLIST_AUDIO_BASE  "/audio/"

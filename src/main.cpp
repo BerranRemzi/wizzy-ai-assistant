@@ -41,7 +41,7 @@ static bool play_button_was_pressed = false;
 static uint32_t play_button_changed_at_ms = 0;
 static const int32_t CLOCK_TTF_SIZE = 100;
 static lv_font_t *clock_ttf_font = NULL;
-
+#define LV_DOT_SIZE 20
 static uint32_t lv_tick_get_cb(void)
 {
     return millis();
@@ -60,19 +60,15 @@ static bool load_clock_ttf_font()
     return true;
 }
 
+static bool ui_updates_allowed()
+{
+    if (!audio.isRunning()) return true;
+    return ESP.getFreeHeap() >= UI_UPDATE_MIN_FREE_HEAP_BYTES;
+}
+
 void ui_release_heavy_assets_for_audio()
 {
-    if (clock_ttf_font == NULL) return;
-
-    if (ui_clock_label != NULL)
-    {
-        lv_obj_set_style_text_font(ui_clock_label, &lv_font_montserrat_48, 0);
-        lv_obj_invalidate(ui_clock_label);
-    }
-
-    lv_tiny_ttf_destroy(clock_ttf_font);
-    clock_ttf_font = NULL;
-    Serial.println("Clock TTF: released for audio memory recovery");
+    // Keep clock always visible: do not unload/hide Tiny TTF assets automatically.
 }
 
 void my_disp_flush(lv_display_t *disp, const lv_area_t *area, uint8_t *px_map)
@@ -136,7 +132,14 @@ static void create_ui()
     ui_clock_label = lv_label_create(screen);
     lv_label_set_text(ui_clock_label, "0000");
     lv_obj_set_width(ui_clock_label, screenWidth);
-    lv_obj_set_style_text_font(ui_clock_label, clock_ttf_font ? clock_ttf_font : &lv_font_montserrat_48, 0);
+    if (clock_ttf_font != NULL)
+    {
+        lv_obj_set_style_text_font(ui_clock_label, clock_ttf_font, 0);
+    }
+    else
+    {
+        lv_obj_add_flag(ui_clock_label, LV_OBJ_FLAG_HIDDEN);
+    }
     lv_obj_set_style_text_color(ui_clock_label, lv_color_hex(0x000000), 0);
     lv_obj_set_style_text_align(ui_clock_label, LV_TEXT_ALIGN_CENTER, 0);
     lv_label_set_long_mode(ui_clock_label, LV_LABEL_LONG_WRAP);
@@ -145,19 +148,21 @@ static void create_ui()
     /* Blinking separator dots (replaces ':' to avoid frequent label redraws) */
     ui_clock_dot_top = lv_obj_create(screen);
     lv_obj_remove_style_all(ui_clock_dot_top);
-    lv_obj_set_size(ui_clock_dot_top, 10, 10);
+    lv_obj_set_size(ui_clock_dot_top, LV_DOT_SIZE, LV_DOT_SIZE);
     lv_obj_set_style_radius(ui_clock_dot_top, LV_RADIUS_CIRCLE, 0);
     lv_obj_set_style_bg_opa(ui_clock_dot_top, LV_OPA_COVER, 0);
     lv_obj_set_style_bg_color(ui_clock_dot_top, lv_color_hex(0x000000), 0);
     lv_obj_align(ui_clock_dot_top, LV_ALIGN_CENTER, 0, -26);
+    if (clock_ttf_font == NULL) lv_obj_add_flag(ui_clock_dot_top, LV_OBJ_FLAG_HIDDEN);
 
     ui_clock_dot_bottom = lv_obj_create(screen);
     lv_obj_remove_style_all(ui_clock_dot_bottom);
-    lv_obj_set_size(ui_clock_dot_bottom, 10, 10);
+    lv_obj_set_size(ui_clock_dot_bottom, LV_DOT_SIZE, LV_DOT_SIZE);
     lv_obj_set_style_radius(ui_clock_dot_bottom, LV_RADIUS_CIRCLE, 0);
     lv_obj_set_style_bg_opa(ui_clock_dot_bottom, LV_OPA_COVER, 0);
     lv_obj_set_style_bg_color(ui_clock_dot_bottom, lv_color_hex(0x000000), 0);
     lv_obj_align(ui_clock_dot_bottom, LV_ALIGN_CENTER, 0, 18);
+    if (clock_ttf_font == NULL) lv_obj_add_flag(ui_clock_dot_bottom, LV_OBJ_FLAG_HIDDEN);
 
     /* Small IP address at bottom center */
     ui_ip_label = lv_label_create(screen);
@@ -180,23 +185,26 @@ static void update_clock_and_ip()
     static uint32_t last_dots_toggle_ms = 0;
 
     // Use NTP/local time when available (Sofia timezone configured in setup)
-    time_t nowt = time(nullptr);
-    if (nowt > 100000)
+    if (clock_ttf_font != NULL && ui_clock_label != NULL)
     {
-        struct tm timeinfo;
-        localtime_r(&nowt, &timeinfo);
-        if (timeinfo.tm_min != last_min)
+        time_t nowt = time(nullptr);
+        if (nowt > 100000)
         {
-            last_min = timeinfo.tm_min;
-            snprintf(time_buf, sizeof(time_buf), "%02d %02d", timeinfo.tm_hour, timeinfo.tm_min);
+            struct tm timeinfo;
+            localtime_r(&nowt, &timeinfo);
+            if (timeinfo.tm_min != last_min)
+            {
+                last_min = timeinfo.tm_min;
+                snprintf(time_buf, sizeof(time_buf), "%02d %02d", timeinfo.tm_hour, timeinfo.tm_min);
+                lv_label_set_text(ui_clock_label, time_buf);
+            }
+        }
+        else
+        {
+            strcpy(time_buf, "-- --");
+            last_min = -1;
             lv_label_set_text(ui_clock_label, time_buf);
         }
-    }
-    else
-    {
-        strcpy(time_buf, "-- --");
-        last_min = -1;
-        lv_label_set_text(ui_clock_label, time_buf);
     }
 
     uint32_t now = millis();
@@ -206,7 +214,7 @@ static void update_clock_and_ip()
         last_dots_toggle_ms = now;
         dots_on = !dots_on;
 
-        if (ui_clock_dot_top != NULL && ui_clock_dot_bottom != NULL)
+        if (clock_ttf_font != NULL && ui_clock_dot_top != NULL && ui_clock_dot_bottom != NULL)
         {
             lv_opa_t opa = dots_on ? LV_OPA_COVER : LV_OPA_TRANSP;
             lv_obj_set_style_bg_opa(ui_clock_dot_top, opa, 0);
@@ -374,13 +382,33 @@ void loop()
     static uint32_t last_inputs_and_status_ms = 0;
     static uint32_t last_lvgl_ms = 0;
     static uint32_t last_clock_ttf_restore_ms = 0;
+    static bool ui_paused_for_memory = false;
     const uint32_t now = millis();
+
+    const bool allow_ui_updates = ui_updates_allowed();
+    if (allow_ui_updates != !ui_paused_for_memory)
+    {
+        ui_paused_for_memory = !allow_ui_updates;
+        if (ui_paused_for_memory)
+        {
+            Serial.printf("UI paused for low heap (%u < %u) while audio running\n",
+                          (unsigned)ESP.getFreeHeap(),
+                          (unsigned)UI_UPDATE_MIN_FREE_HEAP_BYTES);
+        }
+        else
+        {
+            Serial.printf("UI resumed (heap=%u)\n", (unsigned)ESP.getFreeHeap());
+        }
+    }
 
     if ((now - last_inputs_and_status_ms) >= 20)
     {
         last_inputs_and_status_ms = now;
         handle_play_button();
-        update_clock_and_ip();
+        if (allow_ui_updates)
+        {
+            update_clock_and_ip();
+        }
 
         if ((now - last_clock_ttf_restore_ms) >= 5000)
         {
@@ -390,6 +418,7 @@ void loop()
                 if (load_clock_ttf_font())
                 {
                     lv_obj_set_style_text_font(ui_clock_label, clock_ttf_font, 0);
+                    update_clock_and_ip();
                     lv_obj_invalidate(ui_clock_label);
                     Serial.println("Clock TTF: restored");
                 }
@@ -400,7 +429,10 @@ void loop()
     if ((now - last_lvgl_ms) >= 100)
     {
         last_lvgl_ms = now;
-        lv_timer_handler();
+        if (allow_ui_updates)
+        {
+            lv_timer_handler();
+        }
     }
 
     //yield();
