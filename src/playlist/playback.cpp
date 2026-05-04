@@ -3,6 +3,7 @@
 #include "storage/sd_manager.h"
 #include "core/audio_engine.h"
 #include "network/wifi_manager.h"
+#include "ui/ui_component.h"
 #include "config.h"
 #include <Arduino.h>
 #include <Audio.h>
@@ -10,13 +11,18 @@
 #include <FS.h>
 #include <WiFi.h>
 
-extern void ui_release_heavy_assets_for_audio();
-
 bool playback_sequence_active = false;
 bool playback_waiting_for_followup = false;
 static String s_followup_path;
 
 static void set_status(const char *text) { Serial.println(text); }
+
+static void stop_wifi_if_not_connected()
+{
+    if (WiFi.status() == WL_CONNECTED) return;
+    WiFi.disconnect(true, false);
+    WiFi.mode(WIFI_OFF);
+}
 
 // TTS tracking
 static bool s_tts_stream_active = false;
@@ -34,6 +40,7 @@ void playback_stop_tts_tracking()
 
 bool playback_request_sd_file(const char *fname)
 {
+    stop_wifi_if_not_connected();
     if (!sd_manager_ensure_ready()) return false;
     char full_path[32];
     sd_manager_build_path(fname, full_path, sizeof(full_path));
@@ -67,6 +74,7 @@ bool playback_request_sd_file(const char *fname)
 
 bool playback_request_sd_file_by_path(const char *path)
 {
+    stop_wifi_if_not_connected();
     if (!sd_manager_ensure_ready()) return false;
     playlist_release_for_playback();
     audio_engine_prepare_start();
@@ -92,9 +100,11 @@ bool playback_request_sd_file_by_path(const char *path)
 
 bool playback_request_http_stream(const char *url, const char *name)
 {
-    if (WiFi.status() != WL_CONNECTED)
+    if (!wifi_manager_is_connected())
     {
-        if (!wifi_manager_connect_from_sources()) { set_status("WiFi not connected"); return false; }
+        wifi_manager_connect_from_sources();
+        set_status("WiFi connecting... retry");
+        return false;
     }
     audio_engine_prepare_start();
     playlist_unload_if_loaded();
@@ -114,9 +124,11 @@ bool playback_request_http_stream(const char *url, const char *name)
 bool playback_request_tts_stream()
 {
     if (strlen(ELEVENLABS_API_KEY) == 0) { set_status("Missing ELEVENLABS_API_KEY"); return false; }
-    if (WiFi.status() != WL_CONNECTED)
+    if (!wifi_manager_is_connected())
     {
-        if (!wifi_manager_connect_from_sources()) { set_status("WiFi not connected"); return false; }
+        wifi_manager_connect_from_sources();
+        set_status("WiFi connecting... retry");
+        return false;
     }
     audio_engine_prepare_start();
     playlist_unload_if_loaded();

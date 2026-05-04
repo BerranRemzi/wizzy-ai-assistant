@@ -5,6 +5,7 @@
 #include <SD.h>
 #include <FS.h>
 #include <esp_heap_caps.h>
+#include "ui/ui_component.h"
 
 char g_section_files[PLAYLIST_NUM_SECTIONS][PLAYLIST_MAX_ENTRIES][PLAYLIST_MAX_FNAME];
 uint8_t g_section_count[PLAYLIST_NUM_SECTIONS];
@@ -25,8 +26,6 @@ const size_t POOL_SURPRISE_LEN = sizeof(POOL_SURPRISE) / sizeof(POOL_SURPRISE[0]
 const size_t MODE_SECTIONS_LEN = sizeof(MODE_SECTIONS) / sizeof(MODE_SECTIONS[0]);
 
 static bool g_playlist_loaded = false;
-
-extern void ui_release_heavy_assets_for_audio();
 
 static void append_section_entries(JsonArrayConst arr, uint8_t sec)
 {
