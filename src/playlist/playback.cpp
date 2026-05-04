@@ -3,7 +3,6 @@
 #include "storage/sd_manager.h"
 #include "core/audio_engine.h"
 #include "network/wifi_manager.h"
-#include "ui/ui_component.h"
 #include "config.h"
 #include <Arduino.h>
 #include <Audio.h>
@@ -55,7 +54,6 @@ bool playback_request_sd_file(const char *fname)
     if (!audio.connecttoFS(SD, full_path))
     {
         Serial.printf("First SD play attempt failed, trying memory recovery: %s\n", full_path);
-        ui_release_heavy_assets_for_audio();
         audio_engine_prepare_start();
 
         if (!audio.connecttoFS(SD, full_path))
@@ -81,7 +79,6 @@ bool playback_request_sd_file_by_path(const char *path)
     if (!audio.connecttoFS(SD, path))
     {
         Serial.printf("First SD play attempt failed, trying memory recovery: %s\n", path);
-        ui_release_heavy_assets_for_audio();
         audio_engine_prepare_start();
 
         if (!audio.connecttoFS(SD, path))

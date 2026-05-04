@@ -5,7 +5,6 @@
 #include <SD.h>
 #include <FS.h>
 #include <esp_heap_caps.h>
-#include "ui/ui_component.h"
 
 char g_section_files[PLAYLIST_NUM_SECTIONS][PLAYLIST_MAX_ENTRIES][PLAYLIST_MAX_FNAME];
 uint8_t g_section_count[PLAYLIST_NUM_SECTIONS];
@@ -86,11 +85,6 @@ static bool load_from_sd()
 bool playlist_ensure_loaded()
 {
     if (g_playlist_loaded) return true;
-
-    if (load_from_sd()) return true;
-
-    // If JSON parsing fails due low heap, release heavy UI assets and retry once.
-    ui_release_heavy_assets_for_audio();
     return load_from_sd();
 }
 

@@ -49,7 +49,7 @@
 #define PIN_BACKLIGHT        27
 
 // Audio
-#define AUDIO_LIB_VOLUME     21
+#define AUDIO_LIB_VOLUME     5
 
 // TTS bridge
 #define TTS_BRIDGE_PORT      8081

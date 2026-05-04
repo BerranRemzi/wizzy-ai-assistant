@@ -142,7 +142,7 @@ void setup()
                   heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
 
     ui_component_init(&lcd, (uint16_t)lcd.width(), (uint16_t)lcd.height());
-    ui_component_periodic(true, !audio.isRunning());
+    ui_component_task(true);
 
     Serial.printf("Heap after UI init: free=%u min=%u largest=%u\n",
                   ESP.getFreeHeap(),
@@ -199,7 +199,7 @@ void loop()
     {
         last_inputs_and_status_ms = now;
         handle_play_button();
-        ui_component_periodic(allow_ui_updates, !audio.isRunning());
+        ui_component_task(allow_ui_updates);
     }
 
     //yield();

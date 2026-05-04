@@ -13,6 +13,9 @@ static const uint16_t COLOR_DIM = 0x39C4;
 static const uint16_t COLOR_BAR = TFT_WHITE;
 static const uint8_t CLOCK_MAIN_FONT = 6; // Loaded in User_Setup.h
 static const uint8_t CLOCK_MAIN_SIZE = 2;
+static const uint32_t CLOCK_UPDATE_INTERVAL_MS = 1000;
+static const uint32_t DOT_BLINK_INTERVAL_MS = 500;
+static const uint32_t IP_UPDATE_INTERVAL_MS = 10000;
 
 static const int32_t BAR_X = 20;
 static const int32_t BAR_Y = 10;
@@ -31,6 +34,10 @@ static int g_last_hh = -1;
 static int g_last_mm = -1;
 static int g_last_ss = -1;
 static bool g_last_dots_on = false;
+static uint32_t g_last_ip_update = 0;
+static uint32_t g_last_clock_update = 0;
+static uint32_t g_last_dot_toggle_ms = 0;
+static bool g_clock_drawn_once = false;
 
 static void draw_top_second_bar(int ss)
 {
@@ -103,17 +110,12 @@ static void update_clock_and_ip()
 {
     if (g_display == NULL) return;
 
-    static uint32_t last_ip_update = 0;
-    static uint32_t last_clock_update = 0;
-    static uint32_t last_dot_toggle_ms = 0;
-    static bool clock_drawn_once = false;
-
     const uint32_t now = millis();
 
-    if (!clock_drawn_once || (now - last_clock_update) >= 1000)
+    if (!g_clock_drawn_once || (now - g_last_clock_update) >= CLOCK_UPDATE_INTERVAL_MS)
     {
-        last_clock_update = now;
-        clock_drawn_once = true;
+        g_last_clock_update = now;
+        g_clock_drawn_once = true;
 
         time_t nowt = time(nullptr);
         if (nowt > 100000)
@@ -149,16 +151,16 @@ static void update_clock_and_ip()
         }
     }
 
-    if ((now - last_dot_toggle_ms) >= 500)
+    if ((now - g_last_dot_toggle_ms) >= DOT_BLINK_INTERVAL_MS)
     {
-        last_dot_toggle_ms = now;
+        g_last_dot_toggle_ms = now;
         g_last_dots_on = !g_last_dots_on;
         draw_dots(g_last_dots_on);
     }
 
-    if (now - last_ip_update > 10000 || g_last_ip_text[0] == '\0')
+    if (now - g_last_ip_update > IP_UPDATE_INTERVAL_MS || g_last_ip_text[0] == '\0')
     {
-        last_ip_update = now;
+        g_last_ip_update = now;
         String ip_text;
         if (WiFi.status() == WL_CONNECTED)
         {
@@ -189,14 +191,21 @@ void ui_component_init(TFT_eSPI *display, uint16_t screen_width, uint16_t screen
     g_screen_width = screen_width;
     g_screen_height = screen_height;
     g_last_ip_text[0] = '\0';
+    g_last_hh = -1;
+    g_last_mm = -1;
+    g_last_ss = -1;
+    g_last_dots_on = false;
+    g_last_ip_update = 0;
+    g_last_clock_update = 0;
+    g_last_dot_toggle_ms = 0;
+    g_clock_drawn_once = false;
 
     draw_static_surface();
     update_clock_and_ip();
 }
 
-void ui_component_periodic(bool allow_updates, bool can_restore_clock_font)
+void ui_component_task(bool allow_updates)
 {
-    (void)can_restore_clock_font;
     if (g_display == NULL) return;
 
     if (!g_surface_initialized)
@@ -208,9 +217,4 @@ void ui_component_periodic(bool allow_updates, bool can_restore_clock_font)
     {
         update_clock_and_ip();
     }
-}
-
-void ui_release_heavy_assets_for_audio()
-{
-    // No-op for TFT direct rendering: no dynamic LVGL font assets to release.
 }
