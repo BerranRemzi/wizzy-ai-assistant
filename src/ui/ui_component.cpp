@@ -1,215 +1,216 @@
 #include "ui_component.h"
 
 #include <Arduino.h>
+#include <TFT_eSPI.h>
 #include <WiFi.h>
-#include <lvgl.h>
 #include <time.h>
-
-#include <libs/tiny_ttf/lv_tiny_ttf.h>
-
-#include "config.h"
-#include "fonts/ubuntu_font.h"
 
 namespace {
 
-static const int32_t CLOCK_TTF_SIZE = 100;
-static const int32_t CLOCK_DOT_SIZE = 20;
+static const uint16_t COLOR_BG = TFT_BLACK;
+static const uint16_t COLOR_FG = TFT_WHITE;
+static const uint16_t COLOR_DIM = 0x39C4;
+static const uint16_t COLOR_BAR = TFT_WHITE;
+static const uint8_t CLOCK_MAIN_FONT = 6; // Loaded in User_Setup.h
+static const uint8_t CLOCK_MAIN_SIZE = 2;
 
+static const int32_t BAR_X = 20;
+static const int32_t BAR_Y = 10;
+static const int32_t BAR_H = 10;
+static const int32_t DOT_RADIUS = 7;
+static const int32_t DOT_TOP_Y = 98;
+static const int32_t DOT_BOTTOM_Y = 142;
+
+static TFT_eSPI *g_display = NULL;
 static uint16_t g_screen_width = 320;
+static uint16_t g_screen_height = 240;
 
-static lv_obj_t *g_clock_label = NULL;
-static lv_obj_t *g_ip_label = NULL;
-static lv_obj_t *g_clock_dot_top = NULL;
-static lv_obj_t *g_clock_dot_bottom = NULL;
-static lv_font_t *g_clock_ttf_font = NULL;
+static char g_last_ip_text[32] = "";
+static bool g_surface_initialized = false;
+static int g_last_hh = -1;
+static int g_last_mm = -1;
+static int g_last_ss = -1;
+static bool g_last_dots_on = false;
 
-static bool load_clock_ttf_font()
+static void draw_top_second_bar(int ss)
 {
-    if (g_clock_ttf_font != NULL) return true;
+    if (g_display == NULL) return;
 
-    g_clock_ttf_font = lv_tiny_ttf_create_data(ubuntu_font, (size_t)ubuntu_font_size, CLOCK_TTF_SIZE);
-    if (g_clock_ttf_font == NULL)
-    {
-        Serial.println("Clock TTF: lv_tiny_ttf_create_data failed");
-        return false;
-    }
-
-    Serial.printf("Clock TTF: embedded ubuntu_font loaded (%u bytes) at size %d\n", (unsigned)ubuntu_font_size, (int)CLOCK_TTF_SIZE);
-    return true;
+    const int32_t bar_w = (int32_t)g_screen_width - (BAR_X * 2);
+    g_display->fillRect(BAR_X, BAR_Y, bar_w, BAR_H, COLOR_DIM);
+    if (ss < 0) ss = 0;
+    if (ss > 59) ss = 59;
+    const int32_t fill_w = (bar_w * (ss + 1)) / 60;
+    g_display->fillRect(BAR_X, BAR_Y, fill_w, BAR_H, COLOR_BAR);
 }
 
-static void create_ui()
+static void draw_dots(bool on)
 {
-    lv_obj_t *screen = lv_scr_act();
+    if (g_display == NULL) return;
+    const int32_t cx = (int32_t)g_screen_width / 2;
+    const uint16_t color = on ? COLOR_FG : COLOR_BG;
+    g_display->fillCircle(cx, DOT_TOP_Y, DOT_RADIUS, color);
+    g_display->fillCircle(cx, DOT_BOTTOM_Y, DOT_RADIUS, color);
+}
 
-    lv_obj_clean(screen);
-    lv_obj_set_style_bg_color(screen, lv_color_hex(0xFFFFFF), LV_PART_MAIN | LV_STATE_DEFAULT);
-    lv_obj_set_style_bg_opa(screen, LV_OPA_COVER, LV_PART_MAIN | LV_STATE_DEFAULT);
+static void draw_clock_numbers(int hh, int mm)
+{
+    if (g_display == NULL) return;
 
-    g_clock_label = lv_label_create(screen);
-    lv_label_set_text(g_clock_label, "0000");
-    lv_obj_set_width(g_clock_label, g_screen_width);
+    const int32_t ypos = 80;
 
-    if (g_clock_ttf_font != NULL)
-    {
-        lv_obj_set_style_text_font(g_clock_label, g_clock_ttf_font, 0);
-    }
-    else
-    {
-        lv_obj_add_flag(g_clock_label, LV_OBJ_FLAG_HIDDEN);
-    }
+    // Clear numbers area only. Dots are rendered separately for blink control.
+    g_display->fillRect(0, ypos - 8, g_screen_width, 106, COLOR_BG);
 
-    lv_obj_set_style_text_color(g_clock_label, lv_color_hex(0x000000), 0);
-    lv_obj_set_style_text_align(g_clock_label, LV_TEXT_ALIGN_CENTER, 0);
-    lv_label_set_long_mode(g_clock_label, LV_LABEL_LONG_WRAP);
-    lv_obj_align(g_clock_label, LV_ALIGN_CENTER, 0, -8);
+    g_display->setTextFont(1);
+    g_display->setTextSize(CLOCK_MAIN_SIZE);
+    g_display->setTextColor(COLOR_FG, COLOR_BG);
 
-    g_clock_dot_top = lv_obj_create(screen);
-    lv_obj_remove_style_all(g_clock_dot_top);
-    lv_obj_set_size(g_clock_dot_top, CLOCK_DOT_SIZE, CLOCK_DOT_SIZE);
-    lv_obj_set_style_radius(g_clock_dot_top, LV_RADIUS_CIRCLE, 0);
-    lv_obj_set_style_bg_opa(g_clock_dot_top, LV_OPA_COVER, 0);
-    lv_obj_set_style_bg_color(g_clock_dot_top, lv_color_hex(0x000000), 0);
-    lv_obj_align(g_clock_dot_top, LV_ALIGN_CENTER, 0, -26);
-    if (g_clock_ttf_font == NULL) lv_obj_add_flag(g_clock_dot_top, LV_OBJ_FLAG_HIDDEN);
+    char buf[6];
+    snprintf(buf, sizeof(buf), "%02d %02d", hh, mm);
+    g_display->drawCentreString(buf, g_screen_width / 2, ypos, CLOCK_MAIN_FONT);
+}
 
-    g_clock_dot_bottom = lv_obj_create(screen);
-    lv_obj_remove_style_all(g_clock_dot_bottom);
-    lv_obj_set_size(g_clock_dot_bottom, CLOCK_DOT_SIZE, CLOCK_DOT_SIZE);
-    lv_obj_set_style_radius(g_clock_dot_bottom, LV_RADIUS_CIRCLE, 0);
-    lv_obj_set_style_bg_opa(g_clock_dot_bottom, LV_OPA_COVER, 0);
-    lv_obj_set_style_bg_color(g_clock_dot_bottom, lv_color_hex(0x000000), 0);
-    lv_obj_align(g_clock_dot_bottom, LV_ALIGN_CENTER, 0, 18);
-    if (g_clock_ttf_font == NULL) lv_obj_add_flag(g_clock_dot_bottom, LV_OBJ_FLAG_HIDDEN);
+static void draw_ip_text(const String &ip_text)
+{
+    if (g_display == NULL) return;
 
-    g_ip_label = lv_label_create(screen);
-    lv_label_set_text(g_ip_label, "IP: --.--.--.--");
-    lv_obj_set_style_text_font(g_ip_label, &lv_font_montserrat_14, 0);
-    lv_obj_set_style_text_color(g_ip_label, lv_color_hex(0x000000), 0);
-    lv_obj_set_width(g_ip_label, g_screen_width);
-    lv_obj_set_style_text_align(g_ip_label, LV_TEXT_ALIGN_CENTER, 0);
-    lv_label_set_long_mode(g_ip_label, LV_LABEL_LONG_CLIP);
-    lv_obj_align(g_ip_label, LV_ALIGN_BOTTOM_MID, 0, -6);
+    g_display->setTextFont(1);
+    g_display->setTextSize(1);
+    g_display->setTextColor(COLOR_FG, COLOR_BG);
+
+    // Clear a fixed bottom band before writing IP text.
+    const int32_t clear_h = 22;
+    const int32_t clear_y = (int32_t)g_screen_height - clear_h;
+    g_display->fillRect(0, clear_y, g_screen_width, clear_h, COLOR_BG);
+
+    g_display->drawCentreString(ip_text, g_screen_width / 2, g_screen_height - 22, 2);
+}
+
+static void draw_static_surface()
+{
+    if (g_display == NULL) return;
+
+    g_display->fillScreen(COLOR_BG);
+    draw_top_second_bar(0);
+    draw_clock_numbers(0, 0);
+    draw_dots(true);
+    draw_ip_text(String("IP: offline"));
+    g_surface_initialized = true;
 }
 
 static void update_clock_and_ip()
 {
-    static char ip_buf[32];
-    static char time_buf[6] = "-- --";
-    static uint32_t last_ip_update = 0;
-    static int last_min = -1;
-    static bool dots_on = true;
-    static uint32_t last_dots_toggle_ms = 0;
+    if (g_display == NULL) return;
 
-    if (g_clock_ttf_font != NULL && g_clock_label != NULL)
+    static uint32_t last_ip_update = 0;
+    static uint32_t last_clock_update = 0;
+    static uint32_t last_dot_toggle_ms = 0;
+    static bool clock_drawn_once = false;
+
+    const uint32_t now = millis();
+
+    if (!clock_drawn_once || (now - last_clock_update) >= 1000)
     {
+        last_clock_update = now;
+        clock_drawn_once = true;
+
         time_t nowt = time(nullptr);
         if (nowt > 100000)
         {
             struct tm timeinfo;
             localtime_r(&nowt, &timeinfo);
-            if (timeinfo.tm_min != last_min)
+            if (timeinfo.tm_hour != g_last_hh || timeinfo.tm_min != g_last_mm)
             {
-                last_min = timeinfo.tm_min;
-                snprintf(time_buf, sizeof(time_buf), "%02d %02d", timeinfo.tm_hour, timeinfo.tm_min);
-                lv_label_set_text(g_clock_label, time_buf);
+                draw_clock_numbers(timeinfo.tm_hour, timeinfo.tm_min);
+                g_last_hh = timeinfo.tm_hour;
+                g_last_mm = timeinfo.tm_min;
+            }
+            if (timeinfo.tm_sec != g_last_ss)
+            {
+                draw_top_second_bar(timeinfo.tm_sec);
+                g_last_ss = timeinfo.tm_sec;
             }
         }
         else
         {
-            strcpy(time_buf, "-- --");
-            last_min = -1;
-            lv_label_set_text(g_clock_label, time_buf);
+            const int fallback_ss = (int)((now / 1000) % 60);
+            if (g_last_hh != 0 || g_last_mm != 0)
+            {
+                draw_clock_numbers(0, 0);
+                g_last_hh = 0;
+                g_last_mm = 0;
+            }
+            if (fallback_ss != g_last_ss)
+            {
+                draw_top_second_bar(fallback_ss);
+                g_last_ss = fallback_ss;
+            }
         }
     }
 
-    const uint32_t now = millis();
-
-    if ((now - last_dots_toggle_ms) >= 500)
+    if ((now - last_dot_toggle_ms) >= 500)
     {
-        last_dots_toggle_ms = now;
-        dots_on = !dots_on;
-
-        if (g_clock_ttf_font != NULL && g_clock_dot_top != NULL && g_clock_dot_bottom != NULL)
-        {
-            lv_opa_t opa = dots_on ? LV_OPA_COVER : LV_OPA_TRANSP;
-            lv_obj_set_style_bg_opa(g_clock_dot_top, opa, 0);
-            lv_obj_set_style_bg_opa(g_clock_dot_bottom, opa, 0);
-        }
+        last_dot_toggle_ms = now;
+        g_last_dots_on = !g_last_dots_on;
+        draw_dots(g_last_dots_on);
     }
 
-    if (now - last_ip_update > 10000 || strlen(ip_buf) == 0)
+    if (now - last_ip_update > 10000 || g_last_ip_text[0] == '\0')
     {
         last_ip_update = now;
+        String ip_text;
         if (WiFi.status() == WL_CONNECTED)
         {
-            String ip = WiFi.localIP().toString();
-            snprintf(ip_buf, sizeof(ip_buf), "IP: %s", ip.c_str());
+            ip_text = String("IP: ") + WiFi.localIP().toString();
         }
         else
         {
-            strcpy(ip_buf, "IP: offline");
+            ip_text = "IP: offline";
         }
 
-        if (g_ip_label != NULL) lv_label_set_text(g_ip_label, ip_buf);
+        char ip_buf[32];
+        snprintf(ip_buf, sizeof(ip_buf), "%s", ip_text.c_str());
+
+        if (strcmp(ip_buf, g_last_ip_text) != 0)
+        {
+            draw_ip_text(ip_text);
+            strncpy(g_last_ip_text, ip_buf, sizeof(g_last_ip_text));
+            g_last_ip_text[sizeof(g_last_ip_text) - 1] = '\0';
+        }
     }
 }
 
 } // namespace
 
-void ui_component_init(uint16_t screen_width)
+void ui_component_init(TFT_eSPI *display, uint16_t screen_width, uint16_t screen_height)
 {
+    g_display = display;
     g_screen_width = screen_width;
-    load_clock_ttf_font();
-    create_ui();
+    g_screen_height = screen_height;
+    g_last_ip_text[0] = '\0';
+
+    draw_static_surface();
     update_clock_and_ip();
 }
 
 void ui_component_periodic(bool allow_updates, bool can_restore_clock_font)
 {
-    static uint32_t last_clock_ttf_restore_ms = 0;
+    (void)can_restore_clock_font;
+    if (g_display == NULL) return;
 
-    const uint32_t now = millis();
+    if (!g_surface_initialized)
+    {
+        draw_static_surface();
+    }
 
     if (allow_updates)
     {
         update_clock_and_ip();
     }
-
-    if ((now - last_clock_ttf_restore_ms) >= 5000)
-    {
-        last_clock_ttf_restore_ms = now;
-        if (g_clock_ttf_font == NULL && can_restore_clock_font && g_clock_label != NULL)
-        {
-            if (load_clock_ttf_font())
-            {
-                lv_obj_set_style_text_font(g_clock_label, g_clock_ttf_font, 0);
-                lv_obj_clear_flag(g_clock_label, LV_OBJ_FLAG_HIDDEN);
-                if (g_clock_dot_top != NULL) lv_obj_clear_flag(g_clock_dot_top, LV_OBJ_FLAG_HIDDEN);
-                if (g_clock_dot_bottom != NULL) lv_obj_clear_flag(g_clock_dot_bottom, LV_OBJ_FLAG_HIDDEN);
-                update_clock_and_ip();
-                lv_obj_invalidate(g_clock_label);
-                Serial.println("Clock TTF: restored");
-            }
-        }
-    }
 }
 
 void ui_release_heavy_assets_for_audio()
 {
-    if (g_clock_ttf_font == NULL) return;
-
-    if (g_clock_label != NULL)
-    {
-        // Break the reference before destroying the dynamic font.
-        lv_obj_set_style_text_font(g_clock_label, &lv_font_montserrat_14, 0);
-        lv_obj_add_flag(g_clock_label, LV_OBJ_FLAG_HIDDEN);
-    }
-
-    if (g_clock_dot_top != NULL) lv_obj_add_flag(g_clock_dot_top, LV_OBJ_FLAG_HIDDEN);
-    if (g_clock_dot_bottom != NULL) lv_obj_add_flag(g_clock_dot_bottom, LV_OBJ_FLAG_HIDDEN);
-
-    lv_tiny_ttf_destroy(g_clock_ttf_font);
-    g_clock_ttf_font = NULL;
-    Serial.println("Clock TTF: emergency release for audio memory");
+    // No-op for TFT direct rendering: no dynamic LVGL font assets to release.
 }

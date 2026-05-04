@@ -44,6 +44,26 @@ def neutralize_asm_file(path):
         print(f"Neutralized incompatible source: {path}")
 
 
+def patch_tft_setup_select(path):
+    if not os.path.isfile(path):
+        return
+
+    with open(path, 'r', encoding='utf-8') as f:
+        content = f.read()
+
+    needle = '#include <User_Setups/Setup42_ILI9341_ESP32.h>'
+    replacement = '//#include <User_Setups/Setup42_ILI9341_ESP32.h>'
+    if needle not in content:
+        return
+
+    content = content.replace(needle, replacement)
+    with open(path, 'w', encoding='utf-8') as f:
+        f.write(content)
+
+    if VERBOSE:
+        print(f"Patched TFT_eSPI setup selector: {path}")
+
+
 def main():
     project_root = os.environ.get('PLATFORMIO_PROJECT_DIR')
     if not project_root:
@@ -58,6 +78,7 @@ def main():
     us = find_user_setup(project_root)
     if us:
         copy_file(us, os.path.join(target_base, 'User_Setup.h'))
+        copy_file(us, os.path.join(target_base, 'TFT_eSPI', 'User_Setup.h'))
     else:
         print('Warning: User_Setup.h not found in include/, src/, or tools/libraries/')
 
@@ -75,6 +96,9 @@ def main():
     lvgl_base = os.path.join(target_base, 'lvgl')
     neutralize_asm_file(os.path.join(lvgl_base, 'src', 'draw', 'sw', 'blend', 'helium', 'lv_blend_helium.S'))
     neutralize_asm_file(os.path.join(lvgl_base, 'src', 'draw', 'sw', 'blend', 'neon', 'lv_blend_neon.S'))
+
+    # Ensure TFT_eSPI does not force a bundled setup that conflicts with project pins.
+    patch_tft_setup_select(os.path.join(target_base, 'TFT_eSPI', 'User_Setup_Select.h'))
 
     # Summary (only printed when verbose)
     if VERBOSE:

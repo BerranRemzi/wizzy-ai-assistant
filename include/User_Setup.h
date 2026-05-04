@@ -3,7 +3,7 @@
 // TFT_eSPI configuration matching the device schematic.
 // TFT uses HSPI; SD card uses VSPI. No bus sharing.
 
-#define ILI9341
+#define ILI9341_DRIVER
 
 #define TFT_WIDTH   320
 #define TFT_HEIGHT  240
@@ -21,12 +21,18 @@
 #define TFT_MOSI   13   // TFT_SDI / TP_DIN
 #define TFT_SCLK   14   // TFT_CLK / TP_CLK
 #define TFT_MISO   12   // TFT_SDO / TP_OUT (optional, for reads)
+#define TOUCH_CS   33
 
 // Fonts (keep minimal to save flash; add as needed)
 #define LOAD_GLCD   // 8‑pixel font
 #define LOAD_FONT2  // 16‑pixel font
 #define LOAD_FONT4  // 26‑pixel font
 #define LOAD_FONT6  // 48‑pixel font
+
+// Keep smooth font disabled; this project uses bitmap fonts only.
+#ifdef SMOOTH_FONT
+#undef SMOOTH_FONT
+#endif
 
 // HSPI clock frequency (40 MHz typical)
 #define SPI_FREQUENCY  40000000

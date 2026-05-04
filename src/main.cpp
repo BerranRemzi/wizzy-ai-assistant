@@ -1,6 +1,5 @@
 #define TOUCH_CS 33
 #include <Arduino.h>
-#include <lvgl.h>
 #include <TFT_eSPI.h>
 #include <WiFi.h>
 #include <time.h>
@@ -24,18 +23,11 @@ static void handle_play_button();
 // Display
 static const uint16_t screenWidth  = 320;
 static const uint16_t screenHeight = 240;
-static lv_color_t buf1[ screenWidth * screenHeight / 8 ];
 static TFT_eSPI lcd = TFT_eSPI();
-static lv_obj_t *test_status_label = NULL;
 static uint16_t touch_cal_data[5] = { 557, 3263, 369, 3493, 3 };
 static bool play_button_was_pressed = false;
 static uint32_t play_button_changed_at_ms = 0;
 static bool ntp_configured = false;
-
-static uint32_t lv_tick_get_cb(void)
-{
-    return millis();
-}
 
 static bool ui_updates_allowed()
 {
@@ -43,34 +35,9 @@ static bool ui_updates_allowed()
     return ESP.getFreeHeap() >= UI_UPDATE_MIN_FREE_HEAP_BYTES;
 }
 
-void my_disp_flush(lv_display_t *disp, const lv_area_t *area, uint8_t *px_map)
-{
-    uint32_t w = (area->x2 - area->x1 + 1);
-    uint32_t h = (area->y2 - area->y1 + 1);
-    lcd.startWrite();
-    lcd.setAddrWindow(area->x1, area->y1, w, h);
-    lcd.pushColors((uint16_t *)px_map, w * h, true);
-    lcd.endWrite();
-    lv_display_flush_ready(disp);
-}
-
-void my_touchpad_read(lv_indev_t *indev_driver, lv_indev_data_t *data)
-{
-#ifdef TOUCH_CS
-    uint16_t touchX, touchY;
-    bool touched = lcd.getTouch(&touchX, &touchY, 600);
-    if (!touched) { data->state = LV_INDEV_STATE_REL; }
-    else { data->state = LV_INDEV_STATE_PR; data->point.x = touchX; data->point.y = touchY; }
-#else
-    (void)indev_driver;
-    data->state = LV_INDEV_STATE_REL;
-#endif
-}
-
 static void set_status(const char *text)
 {
     Serial.println(text);
-    if (test_status_label != NULL) lv_label_set_text(test_status_label, text);
 }
 
 static void handle_play_button()
@@ -103,9 +70,6 @@ void setup()
     audio.setVolume(AUDIO_LIB_VOLUME);
     wifi_manager_init();
     wifi_manager_connect_from_sources();
-
-    lv_init();
-    lv_tick_set_cb(lv_tick_get_cb);
 
     // Diagnostic info: TFT pin macros (from include/User_Setup.h)
 #ifdef TFT_CS
@@ -145,10 +109,9 @@ void setup()
 #endif
     Serial.printf("TFT pins: CS=%d DC=%d MOSI=%d SCLK=%d MISO=%d BL=%d RST=%d\n", dbg_TFT_CS, dbg_TFT_DC, dbg_TFT_MOSI, dbg_TFT_SCLK, dbg_TFT_MISO, dbg_TFT_BL, dbg_TFT_RST);
 
-    Serial.println("Starting lcd.begin()...");
-    lcd.begin();
-    Serial.println("lcd.begin() returned");
-    lcd.fillScreen(TFT_WHITE);
+    Serial.println("Starting lcd.init()...");
+    lcd.init();
+    Serial.println("lcd.init() returned");
     delay(300);
     pinMode(PIN_BACKLIGHT, OUTPUT);
     // Backlight diagnostics: try toggle to verify BL pin and polarity
@@ -159,6 +122,8 @@ void setup()
     delay(50);
     Serial.println("Backlight should be ON now");
     lcd.setRotation(1);
+    lcd.invertDisplay(false);
+    lcd.fillScreen(TFT_BLACK);
 #if defined(TFT_eSPI_h) || defined(TFT_eSPI)
     // Try to print some driver/readout info where available
     Serial.printf("Display size: %dx%d\n", lcd.width(), lcd.height());
@@ -167,29 +132,19 @@ void setup()
     lcd.setTouch(touch_cal_data);
 #endif
 
-    lv_display_t *disp = lv_display_create(screenWidth, screenHeight);
-    lv_display_set_color_format(disp, LV_COLOR_FORMAT_RGB565);
-    lv_display_set_flush_cb(disp, my_disp_flush);
-    lv_display_set_buffers(disp, buf1, NULL, sizeof(buf1), LV_DISPLAY_RENDER_MODE_PARTIAL);
-
-    lv_indev_t *indev = lv_indev_create();
-    lv_indev_set_type(indev, LV_INDEV_TYPE_POINTER);
-    lv_indev_set_read_cb(indev, my_touchpad_read);
-
     // Start audio early so decoder buffers reserve memory before heavy UI/font allocations.
     set_status("Audio test ready");
     playback_play_startup_system();
 
-    Serial.printf("Heap before TinyTTF/UI: free=%u min=%u largest=%u\n",
+    Serial.printf("Heap before UI init: free=%u min=%u largest=%u\n",
                   ESP.getFreeHeap(),
                   ESP.getMinFreeHeap(),
                   heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
 
-    ui_component_init(screenWidth);
+    ui_component_init(&lcd, (uint16_t)lcd.width(), (uint16_t)lcd.height());
     ui_component_periodic(true, !audio.isRunning());
-    lv_timer_handler();
 
-    Serial.printf("Heap after TinyTTF/UI: free=%u min=%u largest=%u\n",
+    Serial.printf("Heap after UI init: free=%u min=%u largest=%u\n",
                   ESP.getFreeHeap(),
                   ESP.getMinFreeHeap(),
                   heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
@@ -221,7 +176,6 @@ void loop()
     tts_bridge_check_finished();
 
     static uint32_t last_inputs_and_status_ms = 0;
-    static uint32_t last_lvgl_ms = 0;
     static bool ui_paused_for_memory = false;
     const uint32_t now = millis();
 
@@ -246,15 +200,6 @@ void loop()
         last_inputs_and_status_ms = now;
         handle_play_button();
         ui_component_periodic(allow_ui_updates, !audio.isRunning());
-    }
-
-    if ((now - last_lvgl_ms) >= 100)
-    {
-        last_lvgl_ms = now;
-        if (allow_ui_updates)
-        {
-            lv_timer_handler();
-        }
     }
 
     //yield();
