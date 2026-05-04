@@ -28,6 +28,7 @@
 #define LOAD_FONT2  // 16‑pixel font
 #define LOAD_FONT4  // 26‑pixel font
 #define LOAD_FONT6  // 48‑pixel font
+#define LOAD_GFXFF  // Free font support for smooth-style clock mode
 
 // Keep smooth font disabled; this project uses bitmap fonts only.
 #ifdef SMOOTH_FONT
