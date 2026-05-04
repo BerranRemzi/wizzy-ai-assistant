@@ -13,6 +13,8 @@
 #include "core/audio_engine.h"
 #include "network/wifi_manager.h"
 #include "network/tts_bridge.h"
+#include "network/ota_manager.h"
+#include "network/webdav_manager.h"
 #include "playlist/playback.h"
 #include "commands/serial_commands.h"
 #include "ui/ui_component.h"
@@ -69,6 +71,8 @@ void setup()
 
     audio.setVolume(AUDIO_LIB_VOLUME);
     wifi_manager_init();
+    ota_manager_init();
+    webdav_manager_init();
     wifi_manager_connect_from_sources();
 
     // Diagnostic info: TFT pin macros (from include/User_Setup.h)
@@ -165,6 +169,8 @@ void loop()
 
     audio.loop();
     wifi_manager_task();
+    ota_manager_task();
+    webdav_manager_task();
 
     if (!ntp_configured && wifi_manager_is_connected())
     {
