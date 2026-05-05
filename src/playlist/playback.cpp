@@ -12,9 +12,63 @@
 
 bool playback_sequence_active = false;
 bool playback_waiting_for_followup = false;
-static String s_followup_path;
+static const uint8_t FOLLOWUP_QUEUE_CAPACITY = 8;
+static String s_followup_queue[FOLLOWUP_QUEUE_CAPACITY];
+static uint8_t s_followup_count = 0;
 
 static void set_status(const char *text) { Serial.println(text); }
+
+static void clear_followup_queue()
+{
+    for (uint8_t i = 0; i < FOLLOWUP_QUEUE_CAPACITY; i++) s_followup_queue[i] = "";
+    s_followup_count = 0;
+}
+
+static bool enqueue_followup_path(const char *path)
+{
+    if (path == nullptr || path[0] == '\0') return false;
+    if (s_followup_count >= FOLLOWUP_QUEUE_CAPACITY) return false;
+    s_followup_queue[s_followup_count++] = path;
+    return true;
+}
+
+static bool dequeue_followup_path(String *out_path)
+{
+    if (out_path == nullptr || s_followup_count == 0) return false;
+    *out_path = s_followup_queue[0];
+    for (uint8_t i = 1; i < s_followup_count; i++) s_followup_queue[i - 1] = s_followup_queue[i];
+    s_followup_queue[s_followup_count - 1] = "";
+    s_followup_count--;
+    return true;
+}
+
+static bool start_primary_with_followups(const char *primary_fname,
+                                         const char followups[][PLAYLIST_MAX_FNAME],
+                                         uint8_t followup_count)
+{
+    if (primary_fname == nullptr || primary_fname[0] == '\0') return false;
+
+    clear_followup_queue();
+    for (uint8_t i = 0; i < followup_count; i++)
+    {
+        char full_path[32];
+        sd_manager_build_path(followups[i], full_path, sizeof(full_path));
+        if (!enqueue_followup_path(full_path))
+        {
+            clear_followup_queue();
+            return false;
+        }
+    }
+
+    playback_waiting_for_followup = (s_followup_count > 0);
+    playback_sequence_active = playback_waiting_for_followup;
+    if (playback_request_sd_file(primary_fname)) return true;
+
+    clear_followup_queue();
+    playback_waiting_for_followup = false;
+    playback_sequence_active = false;
+    return false;
+}
 
 static void stop_wifi_if_not_connected()
 {
@@ -162,19 +216,14 @@ bool playback_play_mode_pool(const uint8_t *pool_secs, uint8_t n)
     const char *obr_fname = playlist_pick_random_from_sections(obr_sec, 1);
     if (obr_fname != nullptr)
     {
-        char followup[32];
-        sd_manager_build_path(mode_fname, followup, sizeof(followup));
-        s_followup_path = followup;
-        playback_waiting_for_followup = true;
-        playback_sequence_active = true;
-        if (playback_request_sd_file(obr_fname)) return true;
-        s_followup_path = "";
-        playback_waiting_for_followup = false;
-        playback_sequence_active = false;
+        char followups[1][PLAYLIST_MAX_FNAME];
+        strncpy(followups[0], mode_fname, PLAYLIST_MAX_FNAME - 1);
+        followups[0][PLAYLIST_MAX_FNAME - 1] = '\0';
+        if (start_primary_with_followups(obr_fname, followups, 1)) return true;
     }
     playback_sequence_active = false;
     playback_waiting_for_followup = false;
-    s_followup_path = "";
+    clear_followup_queue();
     return playback_request_sd_file(mode_fname);
 }
 
@@ -193,17 +242,49 @@ bool playback_play_obrashenija_plus_mode()
     if (non_empty_count == 0) { set_status("mode sections are empty"); return false; }
     uint8_t chosen_sec = non_empty[esp_random() % non_empty_count];
     const char *mode_fname = g_section_files[chosen_sec][esp_random() % g_section_count[chosen_sec]];
-    char followup[32];
-    sd_manager_build_path(mode_fname, followup, sizeof(followup));
-    if (followup[0] == '\0') { set_status("mode path empty"); return false; }
-    s_followup_path = followup;
-    playback_waiting_for_followup = true;
-    playback_sequence_active = true;
-    if (playback_request_sd_file(obr_fname)) return true;
-    s_followup_path = "";
-    playback_waiting_for_followup = false;
-    playback_sequence_active = false;
-    return false;
+    char followups[1][PLAYLIST_MAX_FNAME];
+    strncpy(followups[0], mode_fname, PLAYLIST_MAX_FNAME - 1);
+    followups[0][PLAYLIST_MAX_FNAME - 1] = '\0';
+    return start_primary_with_followups(obr_fname, followups, 1);
+}
+
+bool playback_play_button_sequence()
+{
+    if (!playlist_ensure_loaded()) return false;
+
+    char sequence_files[PLAYLIST_MAX_BUTTON_SEQUENCE_STEPS][PLAYLIST_MAX_FNAME];
+    uint8_t sequence_count = 0;
+    if (!playlist_pick_button_sequence_files(sequence_files, PLAYLIST_MAX_BUTTON_SEQUENCE_STEPS, &sequence_count))
+    {
+        set_status("button sequence empty");
+        return false;
+    }
+
+    if (sequence_count == 1) return playback_request_sd_file(sequence_files[0]);
+    return start_primary_with_followups(sequence_files[0], &sequence_files[1], sequence_count - 1);
+}
+
+bool playback_play_clock_hour(uint8_t hour)
+{
+    if (!playlist_ensure_loaded()) return false;
+
+    const char *time_fname = playlist_pick_random_clock_time(hour);
+    const char *compose_fname = playlist_pick_random_clock_compose(hour);
+
+    if (time_fname == nullptr && compose_fname == nullptr)
+    {
+        set_status("clock hour has no entries");
+        return false;
+    }
+    if (time_fname != nullptr && compose_fname != nullptr)
+    {
+        char followups[1][PLAYLIST_MAX_FNAME];
+        strncpy(followups[0], compose_fname, PLAYLIST_MAX_FNAME - 1);
+        followups[0][PLAYLIST_MAX_FNAME - 1] = '\0';
+        return start_primary_with_followups(time_fname, followups, 1);
+    }
+    if (time_fname != nullptr) return playback_request_sd_file(time_fname);
+    return playback_request_sd_file(compose_fname);
 }
 
 bool playback_play_startup_system()
@@ -239,11 +320,17 @@ bool playback_handle_followup_mp3()
 {
     if (playback_sequence_active && playback_waiting_for_followup)
     {
+        String path_to_play;
+        if (dequeue_followup_path(&path_to_play) && path_to_play.length() > 0)
+        {
+            playback_waiting_for_followup = (s_followup_count > 0);
+            playback_sequence_active = playback_waiting_for_followup;
+            playback_request_sd_file_by_path_chained(path_to_play.c_str());
+            return true;
+        }
         playback_waiting_for_followup = false;
-        String path_to_play = s_followup_path;
-        s_followup_path = "";
         playback_sequence_active = false;
-        if (path_to_play.length() > 0) { playback_request_sd_file_by_path_chained(path_to_play.c_str()); return true; }
+        clear_followup_queue();
     }
     playback_stop_tts_tracking();
     return false;
@@ -253,11 +340,17 @@ bool playback_handle_followup_stream()
 {
     if (playback_sequence_active && playback_waiting_for_followup)
     {
+        String path_to_play;
+        if (dequeue_followup_path(&path_to_play) && path_to_play.length() > 0)
+        {
+            playback_waiting_for_followup = (s_followup_count > 0);
+            playback_sequence_active = playback_waiting_for_followup;
+            playback_request_sd_file_by_path_chained(path_to_play.c_str());
+            return true;
+        }
         playback_waiting_for_followup = false;
-        String path_to_play = s_followup_path;
-        s_followup_path = "";
         playback_sequence_active = false;
-        if (path_to_play.length() > 0) { playback_request_sd_file_by_path_chained(path_to_play.c_str()); return true; }
+        clear_followup_queue();
     }
     playback_stop_tts_tracking();
     return false;

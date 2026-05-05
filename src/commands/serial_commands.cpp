@@ -13,9 +13,9 @@ void serial_commands_handle(char cmd)
     switch (cmd)
     {
         case '0':
-            Serial.println("Serial cmd 0: random obrashenija + random mode");
-            set_status("Random obrashenija + mode...");
-            playback_play_obrashenija_plus_mode();
+            Serial.println("Serial cmd 0: play configured button sequence");
+            set_status("Button sequence...");
+            playback_play_button_sequence();
             break;
         case '1':
             Serial.println("Serial cmd 1: play radio");
@@ -43,7 +43,7 @@ void serial_commands_handle(char cmd)
             break;
         default:
             Serial.printf("Unknown serial command: %c\n", cmd);
-            Serial.println("Use: 0=obrashenija+mode, 1=play radio, 2=play test, 3=elevenlabs test, s=stop audio");
+            Serial.println("Use: 0=button sequence, 1=play radio, 2=play test, 3=elevenlabs test, s=stop audio");
             break;
     }
 }

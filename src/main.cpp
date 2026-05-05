@@ -30,6 +30,8 @@ static uint16_t touch_cal_data[5] = { 557, 3263, 369, 3493, 3 };
 static bool play_button_was_pressed = false;
 static uint32_t play_button_changed_at_ms = 0;
 static bool ntp_configured = false;
+static int last_announced_day_of_year = -1;
+static int last_announced_hour = -1;
 
 static bool ui_updates_allowed()
 {
@@ -40,6 +42,28 @@ static bool ui_updates_allowed()
 static void set_status(const char *text)
 {
     Serial.println(text);
+}
+
+static void handle_hourly_clock_chime()
+{
+    if (!ntp_configured) return;
+    if (audio.isRunning()) return;
+
+    time_t now = time(nullptr);
+    if (now <= 0) return;
+
+    struct tm local_tm;
+    localtime_r(&now, &local_tm);
+    if (local_tm.tm_min != 0) return;
+
+    if (last_announced_day_of_year == local_tm.tm_yday && last_announced_hour == local_tm.tm_hour) return;
+
+    if (playback_play_clock_hour((uint8_t)local_tm.tm_hour))
+    {
+        last_announced_day_of_year = local_tm.tm_yday;
+        last_announced_hour = local_tm.tm_hour;
+        Serial.printf("Clock chime played for %02d:00\n", local_tm.tm_hour);
+    }
 }
 
 static void handle_play_button()
@@ -54,8 +78,8 @@ static void handle_play_button()
 
         if (pressed)
         {
-            Serial.println("Button: play random obrashenija + mode");
-            playback_play_obrashenija_plus_mode();
+            Serial.println("Button: play configured button sequence");
+            playback_play_button_sequence();
         }
     }
 }
@@ -156,7 +180,7 @@ void setup()
     tts_bridge_server_begin();
     // TTS bridge task is started in tts_bridge.cpp
 
-    Serial.println("Serial commands: 0=obrashenija+mode, 1=play radio, 2=play test, 3=elevenlabs test, s=stop audio");
+    Serial.println("Serial commands: 0=button sequence, 1=play radio, 2=play test, 3=elevenlabs test, s=stop audio");
     Serial.println("Setup done");
 }
 
@@ -205,6 +229,7 @@ void loop()
     {
         last_inputs_and_status_ms = now;
         handle_play_button();
+        handle_hourly_clock_chime();
         ui_component_task(allow_ui_updates);
     }
 

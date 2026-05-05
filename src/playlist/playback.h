@@ -19,4 +19,6 @@ void playback_stop_tts_tracking();
 bool playback_play_random_from_pool(const uint8_t *secs, uint8_t n);
 bool playback_play_mode_pool(const uint8_t *pool_secs, uint8_t n);
 bool playback_play_obrashenija_plus_mode();
+bool playback_play_button_sequence();
+bool playback_play_clock_hour(uint8_t hour);
 bool playback_play_startup_system();

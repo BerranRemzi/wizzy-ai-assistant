@@ -113,6 +113,10 @@ def parse_args() -> argparse.Namespace:
         description="Generate ElevenLabs MP3 from text or from a JSON batch file."
     )
     parser.add_argument(
+        "--api-key",
+        help="ElevenLabs API key. If omitted, ELEVENLABS_API_KEY environment variable is used.",
+    )
+    parser.add_argument(
         "input",
         help="Text to synthesize OR path to a .json file.",
     )
@@ -125,12 +129,25 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def main() -> None:
-    api_key = os.getenv("ELEVENLABS_API_KEY")
-    if not api_key:
-        raise ValueError("Set ELEVENLABS_API_KEY environment variable.")
+def resolve_api_key(args: argparse.Namespace) -> str:
+    if isinstance(args.api_key, str) and args.api_key.strip():
+        return args.api_key.strip()
 
+    api_key = os.getenv("ELEVENLABS_API_KEY")
+    if isinstance(api_key, str) and api_key.strip():
+        return api_key.strip()
+
+    raise ValueError(
+        "Missing ElevenLabs API key.\n"
+        "Use one of:\n"
+        "  1) PowerShell (current session): $env:ELEVENLABS_API_KEY='your_key'\n"
+        "  2) CLI argument: --api-key your_key"
+    )
+
+
+def main() -> None:
     args = parse_args()
+    api_key = resolve_api_key(args)
     input_value = args.input
 
     possible_json = Path(input_value)
