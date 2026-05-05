@@ -30,8 +30,25 @@ const size_t POOL_DAY_LEN      = sizeof(POOL_DAY) / sizeof(POOL_DAY[0]);
 const size_t POOL_NIGHT_LEN    = sizeof(POOL_NIGHT) / sizeof(POOL_NIGHT[0]);
 const size_t POOL_SURPRISE_LEN = sizeof(POOL_SURPRISE) / sizeof(POOL_SURPRISE[0]);
 const size_t MODE_SECTIONS_LEN = sizeof(MODE_SECTIONS) / sizeof(MODE_SECTIONS[0]);
+static const uint8_t BUTTON_RECENT_HISTORY_SIZE = 10;
 
 static bool g_playlist_loaded = false;
+static uint32_t g_last_missing_log_ms = 0;
+static uint32_t g_last_parse_log_ms = 0;
+static const uint32_t PLAYLIST_ERROR_LOG_INTERVAL_MS = 5000;
+static char g_recent_button_files[BUTTON_RECENT_HISTORY_SIZE][PLAYLIST_MAX_FNAME];
+static uint8_t g_recent_button_file_count = 0;
+static uint8_t g_recent_button_file_next = 0;
+
+static void log_playlist_error_throttled(uint32_t *last_ms, const char *fmt, const char *arg)
+{
+    const uint32_t now = millis();
+    if (*last_ms == 0 || (uint32_t)(now - *last_ms) >= PLAYLIST_ERROR_LOG_INTERVAL_MS)
+    {
+        Serial.printf(fmt, arg);
+        *last_ms = now;
+    }
+}
 
 static int8_t section_from_name(const char *name)
 {
@@ -94,14 +111,87 @@ static void append_compose_sections(JsonArrayConst arr, uint8_t *out_sections, u
     }
 }
 
+static bool is_recent_button_file(const char *fname)
+{
+    if (fname == nullptr || fname[0] == '\0') return false;
+    for (uint8_t i = 0; i < g_recent_button_file_count; i++)
+    {
+        if (strncmp(g_recent_button_files[i], fname, PLAYLIST_MAX_FNAME) == 0) return true;
+    }
+    return false;
+}
+
+static void remember_recent_button_file(const char *fname)
+{
+    if (fname == nullptr || fname[0] == '\0') return;
+
+    strncpy(g_recent_button_files[g_recent_button_file_next], fname, PLAYLIST_MAX_FNAME - 1);
+    g_recent_button_files[g_recent_button_file_next][PLAYLIST_MAX_FNAME - 1] = '\0';
+    g_recent_button_file_next = (uint8_t)((g_recent_button_file_next + 1) % BUTTON_RECENT_HISTORY_SIZE);
+    if (g_recent_button_file_count < BUTTON_RECENT_HISTORY_SIZE) g_recent_button_file_count++;
+}
+
+static const char* pick_random_from_sections_avoiding_recent(const uint8_t *secs, uint8_t n)
+{
+    uint16_t total = 0;
+    uint16_t fresh_total = 0;
+
+    for (uint8_t i = 0; i < n; i++)
+    {
+        const uint8_t sec = secs[i];
+        total += g_section_count[sec];
+        for (uint8_t j = 0; j < g_section_count[sec]; j++)
+        {
+            if (!is_recent_button_file(g_section_files[sec][j])) fresh_total++;
+        }
+    }
+
+    if (total == 0) return nullptr;
+
+    uint16_t idx = (uint16_t)(esp_random() % (fresh_total > 0 ? fresh_total : total));
+    for (uint8_t i = 0; i < n; i++)
+    {
+        const uint8_t sec = secs[i];
+        for (uint8_t j = 0; j < g_section_count[sec]; j++)
+        {
+            const bool is_recent = is_recent_button_file(g_section_files[sec][j]);
+            if (fresh_total > 0 && is_recent) continue;
+            if (idx == 0) return g_section_files[sec][j];
+            idx--;
+        }
+    }
+
+    return nullptr;
+}
+
 static bool load_from_sd()
 {
     if (!sd_manager_ensure_ready()) return false;
 
+    if (!SD.exists(PLAYLIST_JSON_PATH))
+    {
+        log_playlist_error_throttled(&g_last_missing_log_ms,
+                                     "Playlist json is missing: %s\n",
+                                     PLAYLIST_JSON_PATH);
+        return false;
+    }
+
     File list_file = SD.open(PLAYLIST_JSON_PATH, FILE_READ);
     if (!list_file)
     {
-        Serial.printf("Failed to open playlist json: %s\n", PLAYLIST_JSON_PATH);
+        log_playlist_error_throttled(&g_last_missing_log_ms,
+                                     "Failed to open playlist json: %s\n",
+                                     PLAYLIST_JSON_PATH);
+        return false;
+    }
+
+    if (list_file.size() == 0)
+    {
+        list_file.close();
+        SD.remove(PLAYLIST_JSON_PATH);
+        log_playlist_error_throttled(&g_last_missing_log_ms,
+                                     "Playlist json was empty and removed: %s\n",
+                                     PLAYLIST_JSON_PATH);
         return false;
     }
 
@@ -110,9 +200,14 @@ static bool load_from_sd()
     list_file.close();
     if (err)
     {
-        Serial.printf("Playlist json parse failed: %s\n", err.c_str());
+        log_playlist_error_throttled(&g_last_parse_log_ms,
+                                     "Playlist json parse failed: %s\n",
+                                     err.c_str());
         return false;
     }
+
+    g_last_missing_log_ms = 0;
+    g_last_parse_log_ms = 0;
 
     playlist_clear_data();
 
@@ -182,6 +277,9 @@ void playlist_clear_data()
     memset(g_clock_time_count, 0, sizeof(g_clock_time_count));
     memset(g_clock_compose_count, 0, sizeof(g_clock_compose_count));
     memset(g_clock_compose_sections, 0, sizeof(g_clock_compose_sections));
+    memset(g_recent_button_files, 0, sizeof(g_recent_button_files));
+    g_recent_button_file_count = 0;
+    g_recent_button_file_next = 0;
 }
 
 void playlist_unload_if_loaded()
@@ -227,8 +325,8 @@ bool playlist_pick_button_sequence_files(char out_files[][PLAYLIST_MAX_FNAME], u
         // Backward compatible fallback: obrashenija + random mode section.
         const uint8_t fallback1[] = { SEC_OBRASHENIJA };
         const uint8_t fallback2[] = { SEC_WAKE_UP, SEC_SCHOOL, SEC_FUN, SEC_THREAT, SEC_ADVENTURE, SEC_SLEEP, SEC_EVENING };
-        const char *f1 = playlist_pick_random_from_sections(fallback1, sizeof(fallback1));
-        const char *f2 = playlist_pick_random_from_sections(fallback2, sizeof(fallback2));
+        const char *f1 = pick_random_from_sections_avoiding_recent(fallback1, sizeof(fallback1));
+        const char *f2 = pick_random_from_sections_avoiding_recent(fallback2, sizeof(fallback2));
         if (f1 == nullptr || f2 == nullptr) return false;
         strncpy(out_files[0], f1, PLAYLIST_MAX_FNAME - 1);
         out_files[0][PLAYLIST_MAX_FNAME - 1] = '\0';
@@ -242,6 +340,8 @@ bool playlist_pick_button_sequence_files(char out_files[][PLAYLIST_MAX_FNAME], u
         {
             *out_count = 1;
         }
+
+        for (uint8_t i = 0; i < *out_count; i++) remember_recent_button_file(out_files[i]);
         return true;
     }
 
@@ -249,12 +349,14 @@ bool playlist_pick_button_sequence_files(char out_files[][PLAYLIST_MAX_FNAME], u
     {
         uint8_t sec_count = g_button_sequence_section_count[i];
         if (sec_count == 0) continue;
-        const char *picked = playlist_pick_random_from_sections(g_button_sequence_sections[i], sec_count);
+        const char *picked = pick_random_from_sections_avoiding_recent(g_button_sequence_sections[i], sec_count);
         if (picked == nullptr) continue;
         strncpy(out_files[*out_count], picked, PLAYLIST_MAX_FNAME - 1);
         out_files[*out_count][PLAYLIST_MAX_FNAME - 1] = '\0';
         (*out_count)++;
     }
+
+    for (uint8_t i = 0; i < *out_count; i++) remember_recent_button_file(out_files[i]);
     return *out_count > 0;
 }
 

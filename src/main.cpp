@@ -30,6 +30,8 @@ static uint16_t touch_cal_data[5] = { 557, 3263, 369, 3493, 3 };
 static bool play_button_was_pressed = false;
 static uint32_t play_button_changed_at_ms = 0;
 static bool ntp_configured = false;
+static int last_clock_attempt_day_of_year = -1;
+static int last_clock_attempt_hour = -1;
 static int last_announced_day_of_year = -1;
 static int last_announced_hour = -1;
 
@@ -55,6 +57,11 @@ static void handle_hourly_clock_chime()
     struct tm local_tm;
     localtime_r(&now, &local_tm);
     if (local_tm.tm_min != 0) return;
+
+    if (last_clock_attempt_day_of_year == local_tm.tm_yday && last_clock_attempt_hour == local_tm.tm_hour) return;
+
+    last_clock_attempt_day_of_year = local_tm.tm_yday;
+    last_clock_attempt_hour = local_tm.tm_hour;
 
     if (last_announced_day_of_year == local_tm.tm_yday && last_announced_hour == local_tm.tm_hour) return;
 
@@ -180,7 +187,7 @@ void setup()
     tts_bridge_server_begin();
     // TTS bridge task is started in tts_bridge.cpp
 
-    Serial.println("Serial commands: 0=button sequence, 1=play radio, 2=play test, 3=elevenlabs test, s=stop audio");
+    serial_commands_print_help();
     Serial.println("Setup done");
 }
 
