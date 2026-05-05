@@ -12,6 +12,7 @@ bool playback_request_http_stream(const char *url, const char *name);
 bool playback_request_tts_stream();
 bool playback_handle_followup_mp3();
 bool playback_handle_followup_stream();
+bool playback_request_sd_file_by_path_chained(const char *path); // gapless chain
 void playback_stop_tts_tracking();
 
 // Pools

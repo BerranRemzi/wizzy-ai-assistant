@@ -24,4 +24,11 @@ void audio_engine_stop_if_active()
     audio_engine_stop();
 }
 
+// Lightweight prepare for chaining tracks: the previous eof already drained the
+// DMA buffers, so we only need to zero the volume before the next connecttoFS.
+void audio_engine_prepare_chain()
+{
+    audio.setVolume(0);
+}
+
 uint8_t audio_engine_get_volume() { return audio.getVolume(); }

@@ -214,6 +214,27 @@ bool playback_play_startup_system()
     return playback_play_random_from_pool(sys_sec, 1);
 }
 
+// Chained version: skips stop/clearDMA/settle since the previous track already
+// finished (eof callback). This removes the audible gap between two SD files.
+bool playback_request_sd_file_by_path_chained(const char *path)
+{
+    stop_wifi_if_not_connected();
+    if (!sd_manager_ensure_ready()) return false;
+    playlist_release_for_playback();
+    audio_engine_prepare_chain(); // volume=0, no stop/settle
+    if (!audio.connecttoFS(SD, path))
+    {
+        audio.setVolume(0);
+        Serial.printf("Failed to play chained SD file: %s\n", path);
+        set_status("SD file failed");
+        return false;
+    }
+    audio.setVolume(AUDIO_LIB_VOLUME);
+    Serial.printf("Playing chained SD file: %s\n", path);
+    set_status("Playing SD audio");
+    return true;
+}
+
 bool playback_handle_followup_mp3()
 {
     if (playback_sequence_active && playback_waiting_for_followup)
@@ -222,7 +243,7 @@ bool playback_handle_followup_mp3()
         String path_to_play = s_followup_path;
         s_followup_path = "";
         playback_sequence_active = false;
-        if (path_to_play.length() > 0) { playback_request_sd_file_by_path(path_to_play.c_str()); return true; }
+        if (path_to_play.length() > 0) { playback_request_sd_file_by_path_chained(path_to_play.c_str()); return true; }
     }
     playback_stop_tts_tracking();
     return false;
@@ -236,7 +257,7 @@ bool playback_handle_followup_stream()
         String path_to_play = s_followup_path;
         s_followup_path = "";
         playback_sequence_active = false;
-        if (path_to_play.length() > 0) { playback_request_sd_file_by_path(path_to_play.c_str()); return true; }
+        if (path_to_play.length() > 0) { playback_request_sd_file_by_path_chained(path_to_play.c_str()); return true; }
     }
     playback_stop_tts_tracking();
     return false;

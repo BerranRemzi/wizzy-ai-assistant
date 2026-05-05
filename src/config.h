@@ -37,6 +37,38 @@
 #define NRJ_TEST_URL "http://play.global.audio/nrj64"
 #endif
 
+#ifndef WEB_DAV_ENABLED
+#define WEB_DAV_ENABLED 1
+#endif
+
+#ifndef WEB_DAV_PORT
+#define WEB_DAV_PORT 80
+#endif
+
+#ifndef WEB_DAV_BASE_PATH
+#define WEB_DAV_BASE_PATH "/dav"
+#endif
+
+#ifndef WEB_DAV_USERNAME
+#define WEB_DAV_USERNAME ""
+#endif
+
+#ifndef WEB_DAV_PASSWORD
+#define WEB_DAV_PASSWORD ""
+#endif
+
+#ifndef OTA_ENABLED
+#define OTA_ENABLED 1
+#endif
+
+#ifndef OTA_HOSTNAME
+#define OTA_HOSTNAME "wizzy-assistant"
+#endif
+
+#ifndef OTA_PASSWORD
+#define OTA_PASSWORD ""
+#endif
+
 // Hardware pins
 #define PIN_MIC_ADC          25
 #define PIN_PLAY_BUTTON      21
