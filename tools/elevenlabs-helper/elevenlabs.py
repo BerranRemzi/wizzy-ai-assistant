@@ -29,57 +29,76 @@ def write_mp3(output_path: Path, audio_bytes: bytes) -> None:
     output_path.write_bytes(audio_bytes)
 
 
-def validate_json_payload(payload: object) -> list[str]:
+def collect_audio_entries(payload: object) -> list[tuple[str, str]]:
+    entries: list[tuple[str, str]] = []
+
+    def walk(node: object) -> None:
+        if isinstance(node, dict):
+            text = node.get("text")
+            file_name = node.get("file")
+            if isinstance(text, str) and isinstance(file_name, str):
+                entries.append((text, file_name))
+            for value in node.values():
+                walk(value)
+        elif isinstance(node, list):
+            for item in node:
+                walk(item)
+
+    walk(payload)
+    return entries
+
+
+def validate_json_payload(payload: object) -> tuple[list[str], list[tuple[str, str]]]:
     errors: list[str] = []
     if not isinstance(payload, dict):
-        return ["Top level JSON must be an object mapping category -> list of items."]
+        return ["Top level JSON must be an object."], []
 
-    for category, items in payload.items():
-        if not isinstance(items, list):
-            errors.append(f"Category '{category}' must be a list.")
+    entries = collect_audio_entries(payload)
+    if not entries:
+        errors.append("No audio entries found. Expected objects with 'text' and 'file'.")
+        return errors, []
+
+    seen_files: set[str] = set()
+    for i, (text, file_name) in enumerate(entries):
+        if not isinstance(text, str) or not text.strip():
+            errors.append(f"Entry #{i}.text must be a non-empty string.")
+
+        if not isinstance(file_name, str) or not file_name.strip():
+            errors.append(f"Entry #{i}.file must be a non-empty string.")
             continue
+        if Path(file_name).name != file_name:
+            errors.append(f"Entry #{i}.file must be a file name only, not a path.")
+        elif not file_name.lower().endswith(".mp3"):
+            errors.append(f"Entry #{i}.file must end with .mp3.")
+        if file_name in seen_files:
+            errors.append(f"Duplicate file name detected: {file_name}")
+        seen_files.add(file_name)
 
-        for i, item in enumerate(items):
-            if not isinstance(item, dict):
-                errors.append(f"{category}[{i}] must be an object.")
-                continue
-
-            text = item.get("text")
-            file_name = item.get("file")
-
-            if not isinstance(text, str) or not text.strip():
-                errors.append(f"{category}[{i}].text must be a non-empty string.")
-
-            if not isinstance(file_name, str) or not file_name.strip():
-                errors.append(f"{category}[{i}].file must be a non-empty string.")
-            elif Path(file_name).name != file_name:
-                errors.append(f"{category}[{i}].file must be a file name only, not a path.")
-            elif not file_name.lower().endswith(".mp3"):
-                errors.append(f"{category}[{i}].file must end with .mp3.")
-
-    return errors
+    return errors, entries
 
 
 def download_from_json(api_key: str, json_path: Path) -> None:
     payload = json.loads(json_path.read_text(encoding="utf-8"))
-    errors = validate_json_payload(payload)
+    errors, entries = validate_json_payload(payload)
     if errors:
         raise ValueError("Invalid JSON:\n- " + "\n- ".join(errors))
 
     output_dir = json_path.parent
-    total = 0
-    for _, items in payload.items():
-        for item in items:
-            text = item["text"]
-            file_name = item["file"]
-            target_path = output_dir / file_name
+    downloaded = 0
+    skipped = 0
+    for text, file_name in entries:
+        target_path = output_dir / file_name
+        if target_path.exists():
+            skipped += 1
+            print(f"Skipped existing: {target_path}")
+            continue
 
-            audio_bytes = tts_request(api_key, text)
-            write_mp3(target_path, audio_bytes)
-            total += 1
-            print(f"Saved: {target_path}")
+        audio_bytes = tts_request(api_key, text)
+        write_mp3(target_path, audio_bytes)
+        downloaded += 1
+        print(f"Saved: {target_path}")
 
-    print(f"Done. Downloaded {total} files.")
+    print(f"Done. Downloaded {downloaded} files, skipped {skipped} existing files.")
 
 
 def download_from_text(api_key: str, text: str, output_file: str) -> None:
