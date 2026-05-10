@@ -1,49 +1,53 @@
 # Wizzie AI Assistant for ESP32
 
-Wizzie is an ESP32-based AI assistant project. The current firmware is an early prototype: it plays random pre-recorded sounds from an SD card when the user interacts with the device. The next development step is to add microphone input, connect the device to a Cloud AI pipeline, and turn it into a fully functional voice assistant.
+Wizzie is an ESP32-based assistant prototype built with PlatformIO and Arduino. The current firmware is centered on reliable audio playback from SD card, simple UI feedback, Wi-Fi services, and experiments around streamed TTS. It is not yet a full voice assistant, but the codebase already includes the building blocks for playlist-driven playback, OTA, WebDAV file access, and ElevenLabs speech generation workflows.
 
-## Current Status
+## Current Firmware Behavior
 
-Implemented:
+Implemented today:
 
-- ESP32 firmware built with PlatformIO and Arduino framework.
-- LVGL/TFT display initialization.
-- SD card audio playlist loading from JSON.
-- Random sound selection from playlist sections.
-- Audio playback through the ESP32 internal DAC path.
-- Serial terminal debug commands.
-- Wi-Fi bootstrap for future cloud features.
-- Local ElevenLabs/TTS bridge experiments are present in the codebase, but the main current use case is SD-card playback.
+- ESP32 firmware using PlatformIO and the Arduino framework.
+- TFT display initialization with a lightweight UI update loop.
+- SD card playlist loading from `/audio/list.json`.
+- Startup playback from the `system` category.
+- Configurable play-button sequence playback from SD card.
+- Hourly clock chimes based on NTP time when Wi-Fi is connected.
+- HTTP audio stream tests and ElevenLabs TTS stream tests over Wi-Fi.
+- OTA update support.
+- WebDAV access to the SD card over Wi-Fi.
+- Serial debug commands for playback and diagnostics.
 
 Current user-facing behavior:
 
-- The device starts, initializes Wi-Fi/display/audio, loads available SD-card sounds, and can play a random sound.
-- Serial commands can be used for debugging playback and network audio paths.
+- On boot, the device initializes serial, audio, Wi-Fi services, display, SD-backed playlist handling, and starts a startup sound from the `system` category when available.
+- Pressing the play button triggers a configured multi-step audio sequence from the playlist.
+- When Wi-Fi is connected and time is synced, the device can automatically play hourly clock announcements.
+- Serial commands can trigger SD playback, radio streams, clock tests, and ElevenLabs TTS streaming.
 
 Planned next steps:
 
-- Add microphone recording.
-- Send captured speech to a Cloud AI/STT pipeline.
-- Generate an assistant reply using an LLM.
-- Convert the reply to speech with TTS.
-- Play the generated response on the ESP32.
+- Add microphone capture on the ESP32.
+- Add push-to-talk or trigger handling for assistant interactions.
+- Send captured audio to a cloud STT pipeline.
+- Generate replies with an LLM.
+- Convert replies to speech and play them back on the device.
 
 ## Hardware
 
 Target hardware:
 
 - ESP32 board.
-- 320x240 display supported by TFT_eSPI/LVGL.
+- 320x240 display driven by TFT_eSPI.
 - SD card connected over SPI.
-- Speaker/audio output using ESP32 internal DAC on GPIO26.
-- Planned microphone input on GPIO25.
-- Planned push-to-talk/debug button on GPIO32.
+- Speaker output through the ESP32 internal DAC.
+- Planned microphone input on an ADC pin.
+- A physical play button for local playback actions.
 
-Current pin assignments are defined in `src/config.h`:
+Current pin assignments from `src/config.h`:
 
-- `PIN_SPEAKER`: GPIO26
 - `PIN_MIC_ADC`: GPIO25
-- `PIN_RECORD_BUTTON`: GPIO32
+- `PIN_PLAY_BUTTON`: GPIO21
+- `PIN_SPEAKER`: GPIO26
 - `PIN_SD_MOSI`: GPIO23
 - `PIN_SD_MISO`: GPIO19
 - `PIN_SD_SCK`: GPIO18
@@ -52,18 +56,13 @@ Current pin assignments are defined in `src/config.h`:
 
 ## SD Card Layout
 
-The firmware expects a playlist JSON file and audio files on the SD card.
+The firmware expects playlist metadata and audio files on the SD card.
 
-Expected playlist path:
+Required paths:
 
 ```text
 /audio/list.json
-```
-
-Expected audio base directory:
-
-```text
-/audio/
+/audio/*.mp3
 ```
 
 Example structure:
@@ -72,12 +71,16 @@ Example structure:
 /audio/
   list.json
   obr_01.mp3
-  wake_01.mp3
   fun_01.mp3
-  system_01.mp3
+  sys_01.mp3
+  clk_08_01.mp3
 ```
 
-The playlist is organized into sections such as:
+### Playlist Format
+
+The firmware accepts playlist categories either directly at the top level or inside a top-level `categories` object. The current project data uses the `categories` layout because it also leaves room for `clock` and `button` configuration.
+
+Recognized category names:
 
 - `obrashenija`
 - `wake_up`
@@ -89,84 +92,119 @@ The playlist is organized into sections such as:
 - `evening`
 - `system`
 
+Each playable entry must have a `file` field. A `text` field is optional for firmware playback, but recommended if you also use the ElevenLabs batch generator described later.
+
 Example `list.json`:
 
 ```json
 {
-  "obrashenija": [
-    { "file": "obr_01.mp3" }
-  ],
-  "wake_up": [
-    { "file": "wake_01.mp3" }
-  ],
-  "school_reminder": [],
-  "fun": [
-    { "file": "fun_01.mp3" }
-  ],
-  "threat": [],
-  "adventure": [],
-  "sleep": [],
-  "evening": [],
-  "system": [
-    { "file": "system_01.mp3" }
-  ]
+  "categories": {
+    "obrashenija": [
+      { "text": "Brave hero", "file": "obr_01.mp3" }
+    ],
+    "wake_up": [
+      { "text": "Time to wake up", "file": "wu_01.mp3" }
+    ],
+    "school_reminder": [],
+    "fun": [
+      { "text": "Mission fun is starting", "file": "fun_01.mp3" }
+    ],
+    "threat": [],
+    "adventure": [],
+    "sleep": [],
+    "evening": [],
+    "system": [
+      { "text": "System ready", "file": "sys_01.mp3" }
+    ]
+  },
+  "clock": {
+    "08": {
+      "time": [
+        { "text": "It is eight o'clock", "file": "clk_08_01.mp3" }
+      ],
+      "compose": ["school_reminder", "wake_up"]
+    }
+  },
+  "button": {
+    "sequence": [
+      { "compose": ["obrashenija"] },
+      { "compose": ["fun", "threat", "adventure"] }
+    ]
+  }
 }
 ```
 
-## Serial Debug Commands
+Notes:
 
-Serial terminal commands are kept intentionally because they are useful during development and will be extended over time.
+- `button.sequence` defines the order of category groups played when the play button is pressed.
+- `clock.<hour>.time` contains direct hour announcement files.
+- `clock.<hour>.compose` contains category names from which a follow-up sound can be selected.
+- Unknown extra sections are ignored by the firmware parser.
 
-Current commands:
+## ElevenLabs Helper
 
-- `0`: Play random `obrashenija` sound, then a random mode sound.
-- `1`: Play NRJ radio stream test.
-- `2`: Play NDR/Icecast stream test.
-- `3`: Play ElevenLabs/TTS stream test path.
-- `s`: Stop audio and free decoder memory.
+The repository includes a helper script at `tools/elevenlabs-helper/elevenlabs.py` for generating MP3 files with ElevenLabs. It supports two modes:
 
-Serial speed:
+- Single-text mode: synthesize one line of text into one MP3 file.
+- Batch mode: read a JSON file, look for objects that contain both `text` and `file`, and generate any missing MP3 files beside that JSON file.
 
-```text
-115200
+### Requirements
+
+- Python 3.
+- The `requests` package.
+- An ElevenLabs API key provided either through `--api-key` or the `ELEVENLABS_API_KEY` environment variable.
+
+Install the dependency:
+
+```bash
+pip install requests
 ```
 
-## Software Architecture
+### PowerShell Setup
 
-The project has been split into small modules under `src/`.
+From the helper directory:
 
-```text
-src/
-  main.cpp                    Application entry point and UI setup
-  config.h                    Pins, constants, URLs, credentials fallback
-  core/
-    audio_engine.*            Audio object, start/stop preparation, DMA cleanup
-    callbacks.*               ESP32-audioI2S callback handlers
-  commands/
-    serial_commands.*         Serial debug command dispatcher
-  network/
-    wifi_manager.*            Wi-Fi connection logic
-    tts_bridge.*              Local bridge for TTS streaming experiments
-  playlist/
-    playlist.*                Playlist loading and random selection
-    playback.*                Playback requests and chained sound logic
-  storage/
-    sd_manager.*              SD card initialization and path helpers
-  utils/
-    http_helpers.*            HTTP line reading, URL encoding, JSON escaping
+```powershell
+cd .\tools\elevenlabs-helper
+$env:ELEVENLABS_API_KEY="your_key"
 ```
 
-Important audio behavior:
+### Single-Text Example
 
-- `audio_engine_stop()` stops playback, frees decoder memory, and clears DMA buffers.
-- `audio_engine_prepare_start()` mutes, clears DMA, waits briefly, and prepares clean playback start.
-- The local `ESP32-audioI2S` library has been modified to improve internal DAC startup/stop behavior and expose decoder memory cleanup.
+Generate one MP3 from a text string:
 
-## Wi-Fi Credentials
+```powershell
+python .\elevenlabs.py "System ready" -o .\audio\sys_01.mp3
+```
 
-The firmware supports credentials from `include/secrets.h` if present.
+Or pass the key explicitly:
 
-Example:
+```powershell
+python .\elevenlabs.py --api-key your_key "System ready" -o .\audio\sys_01.mp3
+```
+
+### Batch JSON Example
+
+Generate all missing files referenced by a JSON file:
+
+```powershell
+python .\elevenlabs.py .\audio\list.json
+```
+
+Batch mode behavior:
+
+- The script recursively scans the JSON for objects containing both `text` and `file`.
+- Existing MP3 files are skipped.
+- New MP3 files are written next to the JSON file.
+- File names must be plain filenames ending in `.mp3`, not nested paths.
+
+This makes it practical to keep one source-of-truth playlist JSON for both the firmware and audio generation.
+
+## Wi-Fi, TTS, OTA, and WebDAV
+
+Wi-Fi credentials can come from `include/secrets.h` or from NVS if that file is absent.
+
+Example `include/secrets.h`:
 
 ```cpp
 #pragma once
@@ -175,26 +213,56 @@ Example:
 #define ELEVENLABS_API_KEY "optional-key"
 ```
 
-If `include/secrets.h` is missing or empty, the firmware attempts to load Wi-Fi credentials from NVS:
+If credentials are not compiled in, the firmware falls back to NVS keys:
 
 - Namespace: `wizzy`
 - Key: `wifi_ssid`
 - Key: `wifi_pass`
 
+Other network features currently in the firmware:
+
+- Local TTS bridge on port `8081` used by the serial ElevenLabs test path.
+- Arduino OTA enabled by default with hostname `wizzy-assistant`.
+- WebDAV enabled by default on port `80` with base path `/dav`.
+
 Do not commit real secrets.
 
-## Build
+## Serial Debug Commands
 
-Build with PlatformIO:
+Serial speed:
 
-```bash
-pio run
+```text
+115200
 ```
 
-Upload:
+Current commands:
+
+- `0`: Play the configured play-button sequence from the playlist.
+- `1`: Play the NRJ radio stream test.
+- `2`: Play the NDR/Icecast stream test.
+- `3`: Play the ElevenLabs TTS stream test through the local bridge.
+- `h`: Test clock playback for the current hour, or the next hour that has available clock entries.
+- `s`: Stop audio playback.
+- `?`: Print command help.
+
+## Build and Upload
+
+Primary PlatformIO environment:
+
+```text
+ai-assistant
+```
+
+Build:
 
 ```bash
-pio run --target upload
+pio run -e ai-assistant
+```
+
+Upload over serial:
+
+```bash
+pio run -e ai-assistant --target upload
 ```
 
 Monitor serial output:
@@ -203,26 +271,64 @@ Monitor serial output:
 pio device monitor -b 115200
 ```
 
+Upload over OTA after the device is on Wi-Fi:
+
+```bash
+pio run -e ai-assistant-ota --target upload
+```
+
+## Software Architecture
+
+The project is organized into focused modules under `src/`.
+
+```text
+src/
+  main.cpp                    Application entry point, loop scheduling, button handling
+  config.h                    Pins, constants, URLs, feature flags, credentials fallback
+  commands/
+    serial_commands.*         Serial command dispatcher and help output
+  core/
+    audio_engine.*            Playback preparation, stop logic, DMA cleanup
+    callbacks.*               Audio library callback hooks
+  network/
+    wifi_manager.*            Wi-Fi connection logic
+    ota_manager.*             Arduino OTA startup and handling
+    tts_bridge.*              Local bridge that relays ElevenLabs audio to the player
+    webdav_manager.*          SD card browsing and file transfer over WebDAV
+  playlist/
+    playlist.*                Playlist parsing, random selection, button and clock metadata
+    playback.*                SD, HTTP, chained playback, and TTS stream requests
+  storage/
+    sd_manager.*              SD card initialization and path helpers
+  ui/
+    ui_component.*            Display updates and simple runtime UI
+  utils/
+    http_helpers.*            HTTP line reading, exact reads, escaping helpers
+```
+
+Important audio behavior:
+
+- Audio is started early in `setup()` so decoder buffers reserve memory before UI allocations.
+- UI refreshes are temporarily paused while audio is running if free heap drops below the configured threshold.
+- Chained SD playback is used for back-to-back sounds to reduce audible gaps.
+- The project uses a custom `ESP32-audioI2S` fork for internal DAC behavior and decoder cleanup.
+
 ## Roadmap
 
-Near-term roadmap:
+Near term:
 
-- Add microphone sampling from GPIO25.
-- Add push-to-talk handling on GPIO32.
-- Package recorded audio and send it to a cloud endpoint.
-- Add cloud STT, LLM, and TTS integration.
-- Stream or download TTS audio back to the device.
-- Add assistant state handling: idle, listening, thinking, speaking, error.
+- Add microphone capture and recording flow.
+- Add assistant state handling such as idle, listening, thinking, speaking, and error.
+- Connect recorded audio to STT, LLM, and TTS cloud services.
+- Keep offline SD-card playback as a fallback path.
 
-Longer-term goals:
+Longer term:
 
-- Child-friendly assistant persona.
-- Bulgarian language support.
-- Safe response filtering in the cloud workflow.
-- Offline fallback sounds from SD card.
-- Better UI indicators for Wi-Fi, listening, speaking, and errors.
-- Configurable playlists and assistant behavior.
+- Improve child-friendly assistant behavior.
+- Expand Bulgarian voice content and assistant prompts.
+- Add better on-screen indicators for Wi-Fi, playback, and errors.
+- Make playlists and behavior more configurable.
 
 ## Notes
 
-This repository is under active development. Current code is primarily focused on reliable SD-card audio playback and debugging infrastructure before adding the full microphone-to-cloud AI assistant loop.
+This repository is still in active development. The current codebase is strongest in SD-card playback, playlist-driven behavior, and tooling around speech/audio content generation rather than end-to-end assistant conversation yet.
